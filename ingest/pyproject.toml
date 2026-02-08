@@ -1,0 +1,7 @@
+[project]
+name = "wiki-rag-ingest"
+version = "0.1.0"
+dependencies = [
+  "boto3",
+  "requests"
+]
