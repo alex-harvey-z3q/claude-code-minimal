@@ -49,9 +49,11 @@ get_vpc_id_from_subnet() {
 }
 
 get_ecs_tasks_sg_id() {
+  local vpc_id="$1"
+
   aws ec2 describe-security-groups \
     --region "$REGION" \
-    --filters "Name=group-name,Values=$CLUSTER-ecs-sg" \
+    --filters "Name=vpc-id,Values=$vpc_id" "Name=group-name,Values=$CLUSTER-ecs-sg" \
     --query 'SecurityGroups[0].GroupId' \
     --output text
 }
@@ -99,8 +101,19 @@ get_exit_code() {
     --cluster "$CLUSTER" \
     --tasks "$task_arn" \
     --region "$REGION" \
-    --query 'tasks[0].containers[0].exitCode' \
+    --query 'tasks[0].containers[?exitCode!=null].exitCode | [0]' \
     --output text
+}
+
+get_task_diagnostics() {
+  local task_arn="$1"
+
+  aws ecs describe-tasks \
+    --cluster "$CLUSTER" \
+    --tasks "$task_arn" \
+    --region "$REGION" \
+    --query 'tasks[0].{stopCode:stopCode,stoppedReason:stoppedReason,containers:containers[*].{name:name,lastStatus:lastStatus,exitCode:exitCode,reason:reason}}' \
+    --output json
 }
 
 main() {
@@ -136,7 +149,7 @@ main() {
   log "Finding ECS tasks security group named $CLUSTER-ecs-sg ..."
 
   local sg_id
-  sg_id="$(get_ecs_tasks_sg_id)"
+  sg_id="$(get_ecs_tasks_sg_id "$vpc_id")"
   [[ -n "$sg_id" && "$sg_id" != "None" ]] || die "Could not find security group with group-name $CLUSTER-ecs-sg"
 
   log "Security group: $sg_id"
@@ -153,7 +166,20 @@ main() {
 
   local exit_code
   exit_code="$(get_exit_code "$task_arn")"
-  [[ "$exit_code" == "0" ]] || die "Ingest failed with exit code $exit_code"
+
+  if [[ -z "$exit_code" || "$exit_code" == "None" ]]; then
+    local diagnostics
+    diagnostics="$(get_task_diagnostics "$task_arn")"
+    die "Ingest task stopped without a container exit code. Diagnostics:
+$diagnostics"
+  fi
+
+  if [[ "$exit_code" != "0" ]]; then
+    local diagnostics
+    diagnostics="$(get_task_diagnostics "$task_arn")"
+    die "Ingest failed with exit code $exit_code. Diagnostics:
+$diagnostics"
+  fi
 
   log "Ingest completed successfully."
 }
