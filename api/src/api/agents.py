@@ -12,6 +12,8 @@ from .llm import invoke_claude
 from .retrieval import retrieve
 
 MAX_ITERS = 3
+WORKSPACE_DIR = Path("/tmp/workspace")
+
 _FILE_HEADER_RE = re.compile(r"^===\s*(?P<filename>.+?)\s*===\s*$", re.MULTILINE)
 
 
@@ -247,37 +249,39 @@ def review_code(
     return invoke_claude(system_prompt, user_prompt, max_tokens=1200, temperature=0.0)
 
 
-def run_workflow(question: str) -> dict:
-    evidence = retrieve(question, k=config.RETRIEVAL_K)
+def run_workflow(question: str, use_retrieval: bool = True) -> dict:
+    evidence = retrieve(question) if use_retrieval else []
     plan = plan_task(question, evidence)
 
-    workspace = Path(getattr(config, "WORKSPACE_DIR", "/tmp/workspace"))
     code = ""
     review = ""
-    test_output = ""
-    tests_passed = False
+    previous_code = None
+    test_output = None
+    review_feedback = None
 
     for _ in range(MAX_ITERS):
         code = implement_task(
             question,
             evidence,
             plan,
-            previous_code=code or None,
-            test_output=test_output or None,
-            review_feedback=review or None,
+            previous_code=previous_code,
+            test_output=test_output,
+            review_feedback=review_feedback,
         )
-        write_files_from_response(code, workspace)
-        tests_passed, test_output = run_tests(workspace)
+
+        write_files_from_response(code, WORKSPACE_DIR)
+        tests_passed, test_output = run_tests(WORKSPACE_DIR)
         review = review_code(question, evidence, code, test_output=test_output)
 
         if tests_passed and no_major_issues(review):
             break
 
+        previous_code = code
+        review_feedback = review
+
     return {
+        "evidence": evidence,
         "plan": plan,
         "code": code,
         "review": review,
-        "test_output": test_output,
-        "tests_passed": tests_passed,
-        "workspace": str(workspace),
     }
