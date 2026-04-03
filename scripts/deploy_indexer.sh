@@ -11,11 +11,11 @@
 set -euo pipefail
 
 readonly AWS_REGION="ap-southeast-2"
-readonly ECR_REPO_NAME="wiki-rag-agentic-indexer"
+readonly ECR_REPO_NAME="claude-code-minimal-indexer"
 readonly DOCKERFILE="indexer/Dockerfile"
 readonly CONTEXT_DIR="indexer"
 readonly CONTAINER_NAME="indexer"
-readonly INDEXER_RULE_NAME="wiki-rag-agentic-indexer"
+readonly INDEXER_RULE_NAME="claude-code-minimal-indexer"
 readonly TARGET_ID="ecs-indexer"
 
 log() {

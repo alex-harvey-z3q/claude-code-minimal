@@ -11,11 +11,11 @@
 set -euo pipefail
 
 readonly AWS_REGION="ap-southeast-2"
-readonly ECR_REPO_NAME="wiki-rag-agentic-ingest"
+readonly ECR_REPO_NAME="claude-code-minimal-ingest"
 readonly DOCKERFILE="ingest/Dockerfile"
 readonly CONTEXT_DIR="ingest"
 readonly CONTAINER_NAME="ingest"
-readonly INGEST_RULE_NAME="wiki-rag-agentic-ingest"
+readonly INGEST_RULE_NAME="claude-code-minimal-ingest"
 readonly INGEST_TARGET_ID="ecs-ingest"
 
 log() {

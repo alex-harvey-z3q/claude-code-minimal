@@ -93,8 +93,8 @@ main() {
   require_cmd jq
 
   local buckets=(
-    "wiki-rag-agentic-raw-885164491973"
-    "wiki-rag-agentic-parsed-885164491973"
+    "claude-code-minimal-raw-885164491973"
+    "claude-code-minimal-parsed-885164491973"
   )
 
   local bucket

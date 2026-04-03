@@ -16,14 +16,14 @@
 set -euo pipefail
 
 readonly AWS_REGION="ap-southeast-2"
-readonly ECR_REPO_NAME="wiki-rag-agentic-api"
+readonly ECR_REPO_NAME="claude-code-minimal-api"
 readonly DOCKERFILE="api/Dockerfile"
 readonly CONTEXT_DIR="api"
 readonly CONTAINER_NAME="api"
 
 # Terraform names (must match your ecs.tf)
-readonly ECS_CLUSTER_NAME="wiki-rag-agentic"
-readonly ECS_SERVICE_NAME="wiki-rag-agentic-api"
+readonly ECS_CLUSTER_NAME="claude-code-minimal"
+readonly ECS_SERVICE_NAME="claude-code-minimal-api"
 
 log() {
   echo "[INFO] $*" >&2
