@@ -3,3 +3,4 @@ terraform/terraform.tfstate*
 **/.venv
 **/__pycache__
 **/*.egg-info
+responses/claude_code_minimal

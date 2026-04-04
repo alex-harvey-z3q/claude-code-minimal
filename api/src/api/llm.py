@@ -4,13 +4,21 @@ from functools import lru_cache
 from typing import Any, Mapping
 
 import boto3
+from botocore.config import Config
 
 from .config import AWS_REGION, BEDROCK_CHAT_MODEL_ID, MAX_TOKENS, TEMPERATURE
 
 
 @lru_cache(maxsize=1)
 def get_bedrock_client():
-    return boto3.client("bedrock-runtime", region_name=AWS_REGION)
+    return boto3.client(
+        "bedrock-runtime",
+        region_name=AWS_REGION,
+        config=Config(
+            read_timeout=300,
+            connect_timeout=10,
+            retries={"max_attempts": 3, "mode": "standard"},
+    ))
 
 
 def invoke_claude(
