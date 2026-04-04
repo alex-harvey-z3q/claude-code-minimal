@@ -369,7 +369,7 @@ def _build_issue_summary(
     return "\n\n".join(parts).strip()
 
 
-def plan_task(question: str, evidence: list[dict]) -> str:
+def plan_task(question: str, evidence: list[dict]) -> tuple[str, dict[str, str]]:
     """Ask the planner model for a compact implementation plan.
 
     The planner turns the user request plus retrieved evidence into a small
@@ -402,7 +402,12 @@ def plan_task(question: str, evidence: list[dict]) -> str:
         "- Make the tests discoverable by python -m unittest discover\n"
         "- Keep it compact and implementation-ready"
     )
-    return invoke_claude(system_prompt, user_prompt, max_tokens=900, temperature=0.0)
+    response = invoke_claude(system_prompt, user_prompt, max_tokens=900, temperature=0.0)
+    return response, {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "response": response,
+    }
 
 
 def implement_task(
@@ -412,7 +417,7 @@ def implement_task(
     *,
     issue_summary: str | None = None,
     retry_mode: bool = False,
-) -> str:
+) -> tuple[str, dict[str, str]]:
     """Ask the implementer model to generate the full multi-file code response.
 
     On the first iteration this uses only the task, evidence, and plan. On later
@@ -472,7 +477,12 @@ def implement_task(
         "...\n"
         "=== test_module.py ==="
     )
-    return invoke_claude(system_prompt, user_prompt, max_tokens=4500, temperature=0.0)
+    response = invoke_claude(system_prompt, user_prompt, max_tokens=4500, temperature=0.0)
+    return response, {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "response": response,
+    }
 
 
 def review_code(
@@ -482,7 +492,7 @@ def review_code(
     *,
     test_output: str = "",
     tests_passed: bool = False,
-) -> str:
+) -> tuple[str, dict[str, str]]:
     """Ask the reviewer model for blocking vs non-blocking feedback.
 
     The reviewer is grounded with explicit runtime test facts so it does not
@@ -520,27 +530,22 @@ def review_code(
         f"Raw test output:\n{test_output or 'No test output.'}\n\n"
         f"Code:\n{code}"
     )
-    return invoke_claude(system_prompt, user_prompt, max_tokens=1000, temperature=0.0)
+    response = invoke_claude(system_prompt, user_prompt, max_tokens=1000, temperature=0.0)
+    return response, {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "response": response,
+    }
 
 
-def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]:
-    """Execute the full iterative coding workflow.
-
-    The loop is:
-
-    1. retrieve evidence
-    2. plan
-    3. implement
-    4. write files
-    5. run tests
-    6. review
-    7. repeat with previous code plus compact feedback until success or max iterations
-
-    The returned payload includes the final artifacts plus per-iteration
-    metadata that makes the loop behaviour visible to the caller.
-    """
+def run_workflow(
+    question: str,
+    use_retrieval: bool = True,
+    debug: bool = False,
+) -> dict[str, object]:
+    """Execute the full iterative coding workflow."""
     evidence = retrieve(question) if use_retrieval else []
-    plan = plan_task(question, evidence)
+    plan, plan_trace = plan_task(question, evidence)
 
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -553,7 +558,7 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
 
     for iteration in range(1, MAX_ITERS + 1):
         retry_mode = iteration > 1
-        code = implement_task(
+        code, implement_trace = implement_task(
             question,
             evidence,
             plan,
@@ -576,7 +581,7 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
                     if path.is_file()
                 ),
             )
-            review = review_code(
+            review, review_trace = review_code(
                 question,
                 evidence,
                 workspace_snapshot,
@@ -587,17 +592,30 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
             tests_passed = False
             test_output = f"File emission validation failed:\n{exc}"
             review = f"MAJOR: {exc}"
+            review_trace = {
+                "system_prompt": "",
+                "user_prompt": "",
+                "response": review,
+            }
 
         has_major_issues = major_issues(review)
 
-        iterations.append({
+        iteration_record: dict[str, object] = {
             "iteration": iteration,
             "tests_passed": tests_passed,
             "major_issues": has_major_issues,
             "test_output": test_output,
             "review": review,
             "retry_files": retry_files,
-        })
+        }
+
+        if debug:
+            iteration_record["trace"] = {
+                "implement": implement_trace,
+                "review": review_trace,
+            }
+
+        iterations.append(iteration_record)
 
         if tests_passed and not has_major_issues:
             stop_reason = "tests_passed_and_review_clean"
@@ -627,7 +645,7 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
         ),
     )
 
-    return {
+    response: dict[str, object] = {
         "evidence": evidence,
         "plan": plan,
         "code": final_code,
@@ -636,3 +654,10 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
         "completed_iteration": len(iterations),
         "stop_reason": stop_reason,
     }
+
+    if debug:
+        response["trace"] = {
+            "plan": plan_trace,
+        }
+
+    return response
