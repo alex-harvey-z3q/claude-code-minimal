@@ -141,13 +141,21 @@ def run_tests(workspace: Path) -> tuple[bool, str]:
             timeout=TEST_TIMEOUT_SECONDS,
             env={**os.environ, "PYTHONPATH": str(workspace)},
         )
+
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or ""
         stderr = exc.stderr or ""
+
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+
         output = "\n\n".join(
             part for part in [stdout.strip(), stderr.strip()] if part
         ) or "Tests timed out."
         return False, f"Test run timed out after {TEST_TIMEOUT_SECONDS} seconds.\n\n{output}"
+
     except Exception as exc:
         return False, f"Test runner failed to start:\n{exc}"
 
