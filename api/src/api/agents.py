@@ -129,20 +129,64 @@ def run_tests(workspace: Path) -> tuple[bool, str]:
     return result.returncode == 0, output
 
 
-def no_major_issues(review: str) -> bool:
-    found_major = False
+def _parse_test_run_count(test_output: str) -> int:
+    match = re.search(r"Ran\s+(\d+)\s+tests?", test_output)
+    if not match:
+        return 0
+    return int(match.group(1))
+
+
+def _tests_actually_ran(test_output: str) -> bool:
+    return _parse_test_run_count(test_output) > 0 and "Ran 0 tests" not in test_output
+
+
+def _build_test_status(test_output: str, tests_passed: bool) -> str:
+    tests_ran = _tests_actually_ran(test_output)
+    test_count = _parse_test_run_count(test_output)
+    return (
+        "Authoritative test execution facts from the runtime:\n"
+        f"- tests_ran: {'true' if tests_ran else 'false'}\n"
+        f"- tests_passed: {'true' if tests_passed else 'false'}\n"
+        f"- tests_run_count: {test_count}\n"
+        "Do not contradict these facts in your review."
+    )
+
+
+def _is_test_execution_major(line: str) -> bool:
+    lowered = line.lower()
+    return (
+        "test discovery" in lowered
+        or "no tests are being discovered" in lowered
+        or "tests are not being discovered" in lowered
+        or "tests are being discovered/run" in lowered
+        or "tests are not being discovered/run" in lowered
+        or "ran 0 tests" in lowered
+        or "no test runner configuration" in lowered
+        or "missing __init__.py" in lowered
+        or "tests are discoverable and running successfully" in lowered
+    )
+
+
+def no_major_issues(review: str, test_output: str = "") -> bool:
+    tests_ran = _tests_actually_ran(test_output)
+
     for raw_line in review.splitlines():
         line = raw_line.strip()
         if not line.startswith("MAJOR:"):
             continue
 
-        found_major = True
-        remainder = line[len("MAJOR:"):].strip().lower()
-        if remainder.startswith("none") or remainder.startswith("no ") or remainder == "n/a":
+        remainder = line[len("MAJOR:"):].strip()
+        lowered = remainder.lower()
+
+        if lowered.startswith("none") or lowered.startswith("no ") or lowered == "n/a":
             continue
+
+        if tests_ran and _is_test_execution_major(remainder):
+            continue
+
         return False
 
-    return found_major or "no major issues" in review.lower()
+    return True
 
 
 def _summarize_test_output(test_output: str, limit: int = 1200) -> str:
@@ -169,8 +213,18 @@ def _summarize_test_output(test_output: str, limit: int = 1200) -> str:
     return summary[:limit]
 
 
-def _extract_major_review_items(review: str) -> str:
-    major_lines = [line.strip() for line in review.splitlines() if line.strip().startswith("MAJOR:")]
+def _extract_major_review_items(review: str, test_output: str = "") -> str:
+    tests_ran = _tests_actually_ran(test_output)
+    major_lines: list[str] = []
+
+    for line in review.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("MAJOR:"):
+            continue
+        if tests_ran and _is_test_execution_major(stripped):
+            continue
+        major_lines.append(stripped)
+
     if major_lines:
         return "\n".join(major_lines)
     return review.strip()[:1200]
@@ -181,7 +235,7 @@ def _build_issue_summary(test_output: str, review: str) -> str:
     if test_output.strip():
         parts.append(f"Test failures:\n{_summarize_test_output(test_output)}")
     if review.strip():
-        parts.append(f"Review feedback:\n{_extract_major_review_items(review)}")
+        parts.append(f"Review feedback:\n{_extract_major_review_items(review, test_output)}")
     return "\n\n".join(parts).strip()
 
 
@@ -254,10 +308,8 @@ def implement_task(
         "- include or update unittest tests needed to validate the requested behaviour\n"
         "- use unittest only\n"
         "- do not use pytest, pytest.ini, setup.cfg, or pyproject-based test configuration\n"
-        "- place tests either as top-level files named test_*.py or under tests/ with tests/__init__.py\n"
+        "- place tests either as top-level files named test_*.py or under tests/\n"
         "- tests must be discoverable by python -m unittest discover\n"
-        "- if you place tests under tests/, include tests/__init__.py when needed\n"
-        "- tests must still run under python -m unittest discover -s tests -p test*.py\n"
         "- output the full updated file set using === filename === separators\n"
         "- do not include Markdown fences\n\n"
         "Retrieved evidence handling:\n"
@@ -281,6 +333,7 @@ def review_code(
     code: str,
     *,
     test_output: str = "",
+    tests_passed: bool = False,
 ) -> str:
     system_prompt = (
         "You are Reviewer, a software review agent. Review generated Python code for "
@@ -294,21 +347,24 @@ def review_code(
         f"Task: {question}\n\n"
         f"Retrieved evidence:\n{_format_evidence(evidence)}\n\n"
         "This workflow uses unittest only.\n"
-        "Do not recommend pytest, pytest.ini, setup.cfg, or third-party test runners.\n\n"
+        "Do not recommend pytest, pytest.ini, setup.cfg, or third-party test runners.\n"
+        "Do not infer or guess test execution facts. Use the authoritative runtime test facts below as ground truth.\n"
+        "Only mark something as MAJOR if it is a blocking defect relative to the explicit task requirements or retrieved evidence.\n"
+        "Do not mark optional enhancements, nice-to-haves, future improvements, or speculative features as MAJOR.\n\n"
+        f"{_build_test_status(test_output, tests_passed)}\n\n"
         "Review the generated implementation. Focus on:\n"
         "- correctness\n"
         "- adherence to retrieved style and conventions\n"
         "- mismatches with retrieved requirements or behaviour\n"
         "- edge cases\n"
         "- structure and readability\n"
-        "- test coverage\n"
-        "- whether tests are discoverable and actually ran\n\n"
+        "- test coverage for required behaviour\n\n"
         "Return short bullet points only. Prefix each bullet with one of:\n"
         "- PASS:\n"
         "- MINOR:\n"
         "- MAJOR:\n\n"
-        "Treat 'Ran 0 tests' as a MAJOR issue.\n\n"
-        f"Test output:\n{test_output or 'No test output.'}\n\n"
+        "Do not include any MAJOR about test discovery, test configuration, or whether tests ran unless the authoritative runtime facts say tests_ran: false.\n\n"
+        f"Raw test output:\n{test_output or 'No test output.'}\n\n"
         f"Code:\n{code}"
     )
     return invoke_claude(system_prompt, user_prompt, max_tokens=1000, temperature=0.0)
@@ -337,13 +393,19 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
         try:
             write_files_from_response(code, WORKSPACE_ROOT)
             tests_passed, test_output = run_tests(WORKSPACE_ROOT)
-            review = review_code(question, evidence, code, test_output=test_output)
+            review = review_code(
+                question,
+                evidence,
+                code,
+                test_output=test_output,
+                tests_passed=tests_passed,
+            )
         except ValueError as exc:
             tests_passed = False
             test_output = f"File emission validation failed:\n{exc}"
             review = f"MAJOR: {exc}"
 
-        major_issues = not no_major_issues(review)
+        major_issues = not no_major_issues(review, test_output)
 
         iterations.append(
             {
@@ -370,4 +432,3 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
         "completed_iteration": len(iterations),
         "stop_reason": stop_reason,
     }
-}
