@@ -17,6 +17,11 @@ _FILE_HEADER_RE = re.compile(r"^===\s*(?P<filename>.+?)\s*===\s*$", re.MULTILINE
 
 
 def _format_evidence(evidence: list[dict]) -> str:
+    """Render retrieved evidence items into a compact prompt-friendly string.
+
+    The planner, implementer, and reviewer all consume the same evidence block.
+    This helper keeps that formatting consistent across all three stages.
+    """
     if not evidence:
         return "No retrieved evidence."
     parts = []
@@ -31,6 +36,13 @@ def _format_evidence(evidence: list[dict]) -> str:
 
 
 def _normalize_file_body(filename: str, body: str) -> str:
+    """Normalize one emitted file body before it is written to disk.
+
+    The implementer is instructed to return plain file contents, but models may
+    still wrap files in Markdown fences. This helper strips those fences, allows
+    intentionally empty __init__.py files, and rejects obviously broken outputs
+    such as incomplete fences or empty non-package files.
+    """
     content = body.lstrip("\n").rstrip()
 
     if content.startswith("```"):
@@ -49,6 +61,13 @@ def _normalize_file_body(filename: str, body: str) -> str:
 
 
 def _parse_files_from_response(code: str) -> list[tuple[str, str]]:
+    """Parse a multi-file model response into ``(filename, body)`` pairs.
+
+    The workflow expects the implementer to emit files using the format
+    ``=== filename ===``. This function validates that structure, normalizes
+    each body, and enforces a minimal sanity check that the response contains
+    more than one file and at least one test file.
+    """
     matches = list(_FILE_HEADER_RE.finditer(code))
     if not matches:
         raise ValueError("Implementer output did not contain any === filename === blocks.")
@@ -74,6 +93,12 @@ def _parse_files_from_response(code: str) -> list[tuple[str, str]]:
 
 
 def write_files_from_response(code: str, workspace: Path) -> None:
+    """Replace the workspace contents with files emitted by the implementer.
+
+    Each iteration starts from a clean workspace so the test run reflects only
+    the current candidate solution. Paths are validated to prevent the model
+    from writing outside the sandbox directory.
+    """
     files = _parse_files_from_response(code)
 
     if workspace.exists():
@@ -90,6 +115,12 @@ def write_files_from_response(code: str, workspace: Path) -> None:
 
 
 def run_tests(workspace: Path) -> tuple[bool, str]:
+    """Run unittest discovery inside the generated workspace.
+
+    Returns a boolean pass/fail flag plus the combined stdout/stderr output.
+    A run that discovers zero tests is treated as a failure, because the loop
+    depends on executed tests rather than empty success.
+    """
     tests_dir = workspace / "tests"
     if tests_dir.exists() and tests_dir.is_dir():
         cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test*.py"]
@@ -130,6 +161,10 @@ def run_tests(workspace: Path) -> tuple[bool, str]:
 
 
 def _parse_test_run_count(test_output: str) -> int:
+    """Extract the unittest run count from raw test output.
+
+    If the standard ``Ran N tests`` line is missing, this returns zero.
+    """
     match = re.search(r"Ran\s+(\d+)\s+tests?", test_output)
     if not match:
         return 0
@@ -137,10 +172,16 @@ def _parse_test_run_count(test_output: str) -> int:
 
 
 def _tests_actually_ran(test_output: str) -> bool:
+    """Return True only when the runtime output confirms real test execution."""
     return _parse_test_run_count(test_output) > 0 and "Ran 0 tests" not in test_output
 
 
 def _build_test_status(test_output: str, tests_passed: bool) -> str:
+    """Build a compact block of authoritative runtime test facts for the reviewer.
+
+    The reviewer should not guess whether tests ran or passed. This block tells
+    it exactly what the executor observed so review comments stay grounded.
+    """
     tests_ran = _tests_actually_ran(test_output)
     test_count = _parse_test_run_count(test_output)
     return (
@@ -153,6 +194,12 @@ def _build_test_status(test_output: str, tests_passed: bool) -> str:
 
 
 def _is_test_execution_major(line: str) -> bool:
+    """Detect reviewer MAJOR lines that are really about test execution facts.
+
+    These claims are special because the runtime already knows the truth about
+    test discovery and execution. They can be ignored when they contradict the
+    actual test output.
+    """
     lowered = line.lower()
     return (
         "test discovery" in lowered
@@ -168,6 +215,12 @@ def _is_test_execution_major(line: str) -> bool:
 
 
 def no_major_issues(review: str, test_output: str = "") -> bool:
+    """Decide whether the review contains any blocking issues.
+
+    MAJOR lines normally block completion. The exception is test-execution
+    complaints that contradict runtime facts, because test discovery and pass
+    counts should be taken from ``run_tests()``, not inferred by the reviewer.
+    """
     tests_ran = _tests_actually_ran(test_output)
 
     for raw_line in review.splitlines():
@@ -190,6 +243,12 @@ def no_major_issues(review: str, test_output: str = "") -> bool:
 
 
 def _summarize_test_output(test_output: str, limit: int = 1200) -> str:
+    """Condense raw test output into the most useful lines for a retry prompt.
+
+    This keeps the feedback loop small by prioritizing failures, errors,
+    tracebacks, and other high-signal lines instead of replaying the entire
+    test transcript into the next implementer prompt.
+    """
     important_lines = []
     for line in test_output.splitlines():
         stripped = line.strip()
@@ -214,6 +273,11 @@ def _summarize_test_output(test_output: str, limit: int = 1200) -> str:
 
 
 def _extract_major_review_items(review: str, test_output: str = "") -> str:
+    """Extract only the blocking reviewer items that should influence the next fix.
+
+    When tests have already run successfully, contradictory test-discovery
+    complaints are dropped so they do not pollute the next iteration.
+    """
     tests_ran = _tests_actually_ran(test_output)
     major_lines: list[str] = []
 
@@ -231,6 +295,12 @@ def _extract_major_review_items(review: str, test_output: str = "") -> str:
 
 
 def _build_issue_summary(test_output: str, review: str) -> str:
+    """Merge condensed test failures and blocking review notes for the next retry.
+
+    This is the main feedback payload fed back into the implementer on each
+    loop iteration. It intentionally stays smaller than pasting the full code
+    and full review back into the next prompt.
+    """
     parts = []
     if test_output.strip():
         parts.append(f"Test failures:\n{_summarize_test_output(test_output)}")
@@ -240,6 +310,11 @@ def _build_issue_summary(test_output: str, review: str) -> str:
 
 
 def plan_task(question: str, evidence: list[dict]) -> str:
+    """Ask the planner model for a compact implementation plan.
+
+    The planner turns the user request plus retrieved evidence into a small
+    structured plan covering files, modules, conventions, behaviour, and tests.
+    """
     system_prompt = (
         "You are Planner, a software planning agent. Produce a concise, structured "
         "implementation plan for a Python application or code change. When retrieved "
@@ -277,6 +352,12 @@ def implement_task(
     *,
     issue_summary: str | None = None,
 ) -> str:
+    """Ask the implementer model to generate the full multi-file code response.
+
+    On the first iteration this uses only the task, evidence, and plan. On later
+    iterations it also includes a compact issue summary distilled from test
+    failures and blocking review comments.
+    """
     system_prompt = (
         "You are Implementer, a Python coding agent. Generate a complete, runnable "
         "Python implementation for the requested task. When retrieved evidence "
@@ -335,6 +416,11 @@ def review_code(
     test_output: str = "",
     tests_passed: bool = False,
 ) -> str:
+    """Ask the reviewer model for blocking vs non-blocking feedback.
+
+    The reviewer is grounded with explicit runtime test facts so it does not
+    invent contradictory claims about whether tests ran or passed.
+    """
     system_prompt = (
         "You are Reviewer, a software review agent. Review generated Python code for "
         "correctness, completeness, and adherence to retrieved evidence. When "
@@ -371,6 +457,21 @@ def review_code(
 
 
 def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]:
+    """Execute the full iterative coding workflow.
+
+    The loop is:
+
+    1. retrieve evidence
+    2. plan
+    3. implement
+    4. write files
+    5. run tests
+    6. review
+    7. repeat with condensed feedback until success or max iterations
+
+    The returned payload includes the final artifacts plus per-iteration
+    metadata that makes the loop behaviour visible to the caller.
+    """
     evidence = retrieve(question) if use_retrieval else []
     plan = plan_task(question, evidence)
 
