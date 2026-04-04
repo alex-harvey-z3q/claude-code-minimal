@@ -14,6 +14,7 @@ from .retrieval import retrieve
 MAX_ITERS = MAX_WORKFLOW_ITERS
 WORKSPACE_ROOT = Path(WORKSPACE_DIR)
 _FILE_HEADER_RE = re.compile(r"^===\s*(?P<filename>.+?)\s*===\s*$", re.MULTILINE)
+_PATH_RE = re.compile(r"(?P<path>[\w./-]+\.(?:py|txt|md|json|yaml|yml))")
 
 
 def _format_evidence(evidence: list[dict]) -> str:
@@ -80,14 +81,8 @@ def _parse_files_from_response(code: str) -> list[tuple[str, str]]:
         body = code[start:end]
         files.append((filename, _normalize_file_body(filename, body)))
 
-    if len(files) < 2:
-        raise ValueError("Implementer output must contain multiple files")
-
-    if not any(
-        Path(filename).name.startswith("test_") or "tests" in Path(filename).parts
-        for filename, _ in files
-    ):
-        raise ValueError("Implementer output must include at least one unittest test file")
+    if len(files) < 1:
+        raise ValueError("Implementer output must contain at least one file")
 
     return files
 
@@ -114,13 +109,22 @@ def write_files_from_response(code: str, workspace: Path) -> None:
         destination.write_text(body, encoding="utf-8")
 
 
-def run_tests(workspace: Path) -> tuple[bool, str]:
-    """Run unittest discovery inside the generated workspace.
+def apply_file_updates_from_response(code: str, workspace: Path) -> None:
+    """Apply only the emitted files onto the existing workspace."""
+    files = _parse_files_from_response(code)
+    workspace.mkdir(parents=True, exist_ok=True)
+    workspace_root = workspace.resolve()
 
-    Returns a boolean pass/fail flag plus the combined stdout/stderr output.
-    A run that discovers zero tests is treated as a failure, because the loop
-    depends on executed tests rather than empty success.
-    """
+    for filename, body in files:
+        destination = (workspace / filename).resolve()
+        if workspace_root != destination and workspace_root not in destination.parents:
+            raise ValueError(f"Refusing to write outside workspace: {filename}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(body, encoding="utf-8")
+
+
+def run_tests(workspace: Path) -> tuple[bool, str]:
+    """Run unittest discovery inside the generated workspace."""
     tests_dir = workspace / "tests"
     if tests_dir.exists() and tests_dir.is_dir():
         cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test*.py"]
@@ -262,14 +266,87 @@ def _extract_review_items(review: str) -> tuple[list[str], list[str]]:
     return major_lines, minor_lines
 
 
-def _build_issue_summary(previous_code: str, test_output: str, review: str) -> str:
-    """Build the retry payload for the next implementation attempt.
+def _infer_related_source_file(test_path: str, workspace: Path) -> list[str]:
+    """Map a failing test file to likely source files in the workspace."""
+    path = Path(test_path)
+    stem = path.stem
+    if stem.startswith("test_"):
+        candidate_stem = stem[len("test_"):]
+        candidates = [
+            workspace / f"{candidate_stem}.py",
+            workspace / path.parent.parent / f"{candidate_stem}.py",
+            workspace / "minesweeper" / f"{candidate_stem}.py",
+        ]
+        found = []
+        for candidate in candidates:
+            rel = candidate.resolve()
+            try:
+                rel.relative_to(workspace.resolve())
+            except ValueError:
+                continue
+            if candidate.exists():
+                found.append(str(candidate.relative_to(workspace)))
+        return found
+    return []
 
-    Retries include the previous code under review plus compact feedback from
-    both tests and review. MAJOR and MINOR review items are both carried
-    forward so non-blocking issues can still influence the next revision.
-    """
-    parts = [f"Previous code:\n{previous_code}"]
+
+def _select_retry_files(code: str, test_output: str, review: str, workspace: Path) -> list[str]:
+    """Choose a small set of files to rewrite on retry iterations."""
+    available = {filename for filename, _ in _parse_files_from_response(code)}
+    selected: list[str] = []
+
+    for text in (test_output, review):
+        for match in _PATH_RE.finditer(text):
+            path = match.group("path")
+            if path in available and path not in selected:
+                selected.append(path)
+
+    for path in list(selected):
+        if Path(path).name.startswith("test_") or "tests" in Path(path).parts:
+            for related in _infer_related_source_file(path, workspace):
+                if related in available and related not in selected:
+                    selected.append(related)
+
+    if not selected:
+        preferred = [
+            filename for filename in available
+            if Path(filename).name.startswith("test_") or "tests" in Path(filename).parts
+        ]
+        non_tests = [filename for filename in available if filename not in preferred]
+        selected = sorted(preferred)[:2] + sorted(non_tests)[:2]
+
+    return selected[:6]
+
+
+def _read_workspace_files(workspace: Path, filenames: list[str]) -> str:
+    """Read a subset of workspace files back into prompt format."""
+    blocks = []
+    workspace_root = workspace.resolve()
+
+    for filename in filenames:
+        path = (workspace / filename).resolve()
+        if workspace_root != path and workspace_root not in path.parents:
+            continue
+        if not path.exists():
+            continue
+        content = path.read_text(encoding="utf-8")
+        blocks.append(f"=== {filename} ===\n{content.rstrip()}\n")
+
+    return "\n".join(blocks).strip()
+
+
+def _build_issue_summary(
+    workspace: Path,
+    retry_files: list[str],
+    test_output: str,
+    review: str,
+) -> str:
+    """Build the retry payload for the next implementation attempt."""
+    parts = ["Files to revise:\n" + "\n".join(f"- {name}" for name in retry_files)]
+
+    file_block = _read_workspace_files(workspace, retry_files)
+    if file_block:
+        parts.append(f"Current file contents:\n{file_block}")
 
     if test_output.strip():
         parts.append(f"Test failures:\n{_summarize_test_output(test_output)}")
@@ -277,9 +354,9 @@ def _build_issue_summary(previous_code: str, test_output: str, review: str) -> s
     major_lines, minor_lines = _extract_review_items(review)
 
     if major_lines:
-        parts.append(f"Blocking review feedback:\n" + "\n".join(major_lines))
+        parts.append("Blocking review feedback:\n" + "\n".join(major_lines))
     if minor_lines:
-        parts.append(f"Non-blocking review feedback:\n" + "\n".join(minor_lines))
+        parts.append("Non-blocking review feedback:\n" + "\n".join(minor_lines))
 
     return "\n\n".join(parts).strip()
 
@@ -326,6 +403,7 @@ def implement_task(
     plan: str,
     *,
     issue_summary: str | None = None,
+    retry_mode: bool = False,
 ) -> str:
     """Ask the implementer model to generate the full multi-file code response.
 
@@ -347,21 +425,24 @@ def implement_task(
         "in Markdown code fences."
     )
 
-    feedback_block = ""
-    if issue_summary:
+    if retry_mode:
         feedback_block = (
-            "Revise the previous code using the issues below. Preserve what already "
-            "works and fix the blocking problems first, then incorporate the non-blocking "
-            "review feedback where reasonable. Return the full updated file set.\n\n"
+            "Revise only the files listed below. Preserve all other files in the "
+            "workspace unchanged. Return only the updated files, using the same "
+            "=== filename === format.\n\n"
             f"{issue_summary}\n\n"
         )
+        generation_instruction = "Generate the updated files now.\n\n"
+    else:
+        feedback_block = ""
+        generation_instruction = "Generate the full implementation now.\n\n"
 
     user_prompt = (
         f"Task: {question}\n\n"
         f"Retrieved evidence:\n{_format_evidence(evidence)}\n\n"
         f"Plan:\n{plan}\n\n"
         f"{feedback_block}"
-        "Generate the full implementation now.\n\n"
+        f"{generation_instruction}"
         "Hard requirements:\n"
         "- Python only\n"
         "- include or update unittest tests needed to validate the requested behaviour\n"
@@ -369,7 +450,7 @@ def implement_task(
         "- do not use pytest, pytest.ini, setup.cfg, or pyproject-based test configuration\n"
         "- place tests either as top-level files named test_*.py or under tests/\n"
         "- tests must be discoverable by python -m unittest discover\n"
-        "- output the full updated file set using === filename === separators\n"
+        "- output files using === filename === separators\n"
         "- do not include Markdown fences\n\n"
         "Retrieved evidence handling:\n"
         "- Treat retrieved style and conventions as binding implementation guidance when present\n"
@@ -458,24 +539,39 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
     code = ""
     review = ""
     issue_summary: str | None = None
+    retry_files: list[str] = []
     iterations: list[dict[str, object]] = []
     stop_reason = "max_iterations_reached"
 
     for iteration in range(1, MAX_ITERS + 1):
+        retry_mode = iteration > 1
         code = implement_task(
             question,
             evidence,
             plan,
             issue_summary=issue_summary,
+            retry_mode=retry_mode,
         )
 
         try:
-            write_files_from_response(code, WORKSPACE_ROOT)
+            if retry_mode:
+                apply_file_updates_from_response(code, WORKSPACE_ROOT)
+            else:
+                write_files_from_response(code, WORKSPACE_ROOT)
+
             tests_passed, test_output = run_tests(WORKSPACE_ROOT)
+            workspace_snapshot = _read_workspace_files(
+                WORKSPACE_ROOT,
+                sorted(
+                    str(path.relative_to(WORKSPACE_ROOT))
+                    for path in WORKSPACE_ROOT.rglob("*.py")
+                    if path.is_file()
+                ),
+            )
             review = review_code(
                 question,
                 evidence,
-                code,
+                workspace_snapshot,
                 test_output=test_output,
                 tests_passed=tests_passed,
             )
@@ -492,18 +588,41 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
             "major_issues": has_major_issues,
             "test_output": test_output,
             "review": review,
+            "retry_files": retry_files,
         })
 
         if tests_passed and not has_major_issues:
             stop_reason = "tests_passed_and_review_clean"
             break
 
-        issue_summary = _build_issue_summary(code, test_output, review)
+        retry_files = _select_retry_files(
+            _read_workspace_files(
+                WORKSPACE_ROOT,
+                sorted(
+                    str(path.relative_to(WORKSPACE_ROOT))
+                    for path in WORKSPACE_ROOT.rglob("*.py")
+                    if path.is_file()
+                ),
+            ),
+            test_output,
+            review,
+            WORKSPACE_ROOT,
+        )
+        issue_summary = _build_issue_summary(WORKSPACE_ROOT, retry_files, test_output, review)
+
+    final_code = _read_workspace_files(
+        WORKSPACE_ROOT,
+        sorted(
+            str(path.relative_to(WORKSPACE_ROOT))
+            for path in WORKSPACE_ROOT.rglob("*.py")
+            if path.is_file()
+        ),
+    )
 
     return {
         "evidence": evidence,
         "plan": plan,
-        "code": code,
+        "code": final_code,
         "review": review,
         "iterations": iterations,
         "completed_iteration": len(iterations),
