@@ -164,7 +164,7 @@ resource "aws_lb" "api" {
   subnets            = aws_subnet.public[*].id
   security_groups    = [aws_security_group.alb.id]
 
-  idle_timeout = 300
+  idle_timeout = 600
 }
 
 resource "aws_lb_target_group" "api" {
