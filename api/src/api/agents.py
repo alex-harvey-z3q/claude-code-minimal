@@ -193,53 +193,20 @@ def _build_test_status(test_output: str, tests_passed: bool) -> str:
     )
 
 
-def _is_test_execution_major(line: str) -> bool:
-    """Detect reviewer MAJOR lines that are really about test execution facts.
-
-    These claims are special because the runtime already knows the truth about
-    test discovery and execution. They can be ignored when they contradict the
-    actual test output.
-    """
-    lowered = line.lower()
-    return (
-        "test discovery" in lowered
-        or "no tests are being discovered" in lowered
-        or "tests are not being discovered" in lowered
-        or "tests are being discovered/run" in lowered
-        or "tests are not being discovered/run" in lowered
-        or "ran 0 tests" in lowered
-        or "no test runner configuration" in lowered
-        or "missing __init__.py" in lowered
-        or "tests are discoverable and running successfully" in lowered
-    )
-
-
-def no_major_issues(review: str, test_output: str = "") -> bool:
-    """Decide whether the review contains any blocking issues.
-
-    MAJOR lines normally block completion. The exception is test-execution
-    complaints that contradict runtime facts, because test discovery and pass
-    counts should be taken from ``run_tests()``, not inferred by the reviewer.
-    """
-    tests_ran = _tests_actually_ran(test_output)
-
+def major_issues(review: str) -> bool:
+    """Return True when the review contains any real blocking issues."""
     for raw_line in review.splitlines():
         line = raw_line.strip()
         if not line.startswith("MAJOR:"):
             continue
 
-        remainder = line[len("MAJOR:"):].strip()
-        lowered = remainder.lower()
-
-        if lowered.startswith("none") or lowered.startswith("no ") or lowered == "n/a":
+        remainder = line[len("MAJOR:"):].strip().lower()
+        if remainder.startswith("none") or remainder.startswith("no ") or remainder == "n/a":
             continue
 
-        if tests_ran and _is_test_execution_major(remainder):
-            continue
+        return True
 
-        return False
-
-    return True
+    return False
 
 
 def _summarize_test_output(test_output: str, limit: int = 1200) -> str:
@@ -272,40 +239,48 @@ def _summarize_test_output(test_output: str, limit: int = 1200) -> str:
     return summary[:limit]
 
 
-def _extract_major_review_items(review: str, test_output: str = "") -> str:
-    """Extract only the blocking reviewer items that should influence the next fix.
+def _extract_review_items(review: str) -> tuple[list[str], list[str]]:
+    """Split reviewer output into MAJOR and MINOR items.
 
-    When tests have already run successfully, contradictory test-discovery
-    complaints are dropped so they do not pollute the next iteration.
+    Both categories are fed back into the next implementation attempt. MAJOR
+    items are blocking issues, while MINOR items capture smaller corrections or
+    improvements that should still influence later iterations.
     """
-    tests_ran = _tests_actually_ran(test_output)
     major_lines: list[str] = []
+    minor_lines: list[str] = []
 
-    for line in review.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("MAJOR:"):
-            continue
-        if tests_ran and _is_test_execution_major(stripped):
-            continue
-        major_lines.append(stripped)
+    for raw_line in review.splitlines():
+        line = raw_line.strip()
+        if line.startswith("MAJOR:"):
+            remainder = line[len("MAJOR:"):].strip().lower()
+            if remainder.startswith("none") or remainder.startswith("no ") or remainder == "n/a":
+                continue
+            major_lines.append(line)
+        elif line.startswith("MINOR:"):
+            minor_lines.append(line)
 
-    if major_lines:
-        return "\n".join(major_lines)
-    return review.strip()[:1200]
+    return major_lines, minor_lines
 
 
-def _build_issue_summary(test_output: str, review: str) -> str:
-    """Merge condensed test failures and blocking review notes for the next retry.
+def _build_issue_summary(previous_code: str, test_output: str, review: str) -> str:
+    """Build the retry payload for the next implementation attempt.
 
-    This is the main feedback payload fed back into the implementer on each
-    loop iteration. It intentionally stays smaller than pasting the full code
-    and full review back into the next prompt.
+    Retries include the previous code under review plus compact feedback from
+    both tests and review. MAJOR and MINOR review items are both carried
+    forward so non-blocking issues can still influence the next revision.
     """
-    parts = []
+    parts = [f"Previous code:\n{previous_code}"]
+
     if test_output.strip():
         parts.append(f"Test failures:\n{_summarize_test_output(test_output)}")
-    if review.strip():
-        parts.append(f"Review feedback:\n{_extract_major_review_items(review, test_output)}")
+
+    major_lines, minor_lines = _extract_review_items(review)
+
+    if major_lines:
+        parts.append(f"Blocking review feedback:\n" + "\n".join(major_lines))
+    if minor_lines:
+        parts.append(f"Non-blocking review feedback:\n" + "\n".join(minor_lines))
+
     return "\n\n".join(parts).strip()
 
 
@@ -355,8 +330,9 @@ def implement_task(
     """Ask the implementer model to generate the full multi-file code response.
 
     On the first iteration this uses only the task, evidence, and plan. On later
-    iterations it also includes a compact issue summary distilled from test
-    failures and blocking review comments.
+    iterations it includes the previous code together with compact test and
+    review feedback so the model can revise the concrete artifact instead of
+    regenerating from scratch.
     """
     system_prompt = (
         "You are Implementer, a Python coding agent. Generate a complete, runnable "
@@ -374,7 +350,9 @@ def implement_task(
     feedback_block = ""
     if issue_summary:
         feedback_block = (
-            "Fix the following issues and regenerate the full updated file set.\n\n"
+            "Revise the previous code using the issues below. Preserve what already "
+            "works and fix the blocking problems first, then incorporate the non-blocking "
+            "review feedback where reasonable. Return the full updated file set.\n\n"
             f"{issue_summary}\n\n"
         )
 
@@ -436,6 +414,7 @@ def review_code(
         "Do not recommend pytest, pytest.ini, setup.cfg, or third-party test runners.\n"
         "Do not infer or guess test execution facts. Use the authoritative runtime test facts below as ground truth.\n"
         "Only mark something as MAJOR if it is a blocking defect relative to the explicit task requirements or retrieved evidence.\n"
+        "Use MINOR for smaller defects, polish issues, non-blocking gaps, or quality improvements that should still influence a later revision.\n"
         "Do not mark optional enhancements, nice-to-haves, future improvements, or speculative features as MAJOR.\n\n"
         f"{_build_test_status(test_output, tests_passed)}\n\n"
         "Review the generated implementation. Focus on:\n"
@@ -449,7 +428,6 @@ def review_code(
         "- PASS:\n"
         "- MINOR:\n"
         "- MAJOR:\n\n"
-        "Do not include any MAJOR about test discovery, test configuration, or whether tests ran unless the authoritative runtime facts say tests_ran: false.\n\n"
         f"Raw test output:\n{test_output or 'No test output.'}\n\n"
         f"Code:\n{code}"
     )
@@ -467,7 +445,7 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
     4. write files
     5. run tests
     6. review
-    7. repeat with condensed feedback until success or max iterations
+    7. repeat with previous code plus compact feedback until success or max iterations
 
     The returned payload includes the final artifacts plus per-iteration
     metadata that makes the loop behaviour visible to the caller.
@@ -506,21 +484,21 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
             test_output = f"File emission validation failed:\n{exc}"
             review = f"MAJOR: {exc}"
 
-        major_issues = not no_major_issues(review, test_output)
+        has_major_issues = major_issues(review)
 
         iterations.append({
             "iteration": iteration,
             "tests_passed": tests_passed,
-            "major_issues": major_issues,
+            "major_issues": has_major_issues,
             "test_output": test_output,
             "review": review,
         })
 
-        if tests_passed and not major_issues:
+        if tests_passed and not has_major_issues:
             stop_reason = "tests_passed_and_review_clean"
             break
 
-        issue_summary = _build_issue_summary(test_output, review)
+        issue_summary = _build_issue_summary(code, test_output, review)
 
     return {
         "evidence": evidence,
