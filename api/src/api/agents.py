@@ -41,6 +41,8 @@ def _normalize_file_body(filename: str, body: str) -> str:
         content = "\n".join(lines[:-1]).rstrip()
 
     if not content.strip():
+        if Path(filename).name == "__init__.py":
+            return ""
         raise ValueError(f"Empty file body for {filename}")
 
     return content + "\n"
