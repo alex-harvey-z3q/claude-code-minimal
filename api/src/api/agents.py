@@ -508,15 +508,13 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
 
         major_issues = not no_major_issues(review, test_output)
 
-        iterations.append(
-            {
-                "iteration": iteration,
-                "tests_passed": tests_passed,
-                "major_issues": major_issues,
-                "test_output": test_output,
-                "review": review,
-            }
-        )
+        iterations.append({
+            "iteration": iteration,
+            "tests_passed": tests_passed,
+            "major_issues": major_issues,
+            "test_output": test_output,
+            "review": review,
+        })
 
         if tests_passed and not major_issues:
             stop_reason = "tests_passed_and_review_clean"
