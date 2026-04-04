@@ -90,9 +90,15 @@ def write_files_from_response(code: str, workspace: Path) -> None:
 
 
 def run_tests(workspace: Path) -> tuple[bool, str]:
+    tests_dir = workspace / "tests"
+    if tests_dir.exists() and tests_dir.is_dir():
+        cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-p", "test*.py"]
+    else:
+        cmd = [sys.executable, "-m", "unittest", "discover", "-s", ".", "-p", "test*.py"]
+
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "unittest", "discover"],
+            cmd,
             cwd=workspace,
             capture_output=True,
             text=True,
@@ -146,7 +152,9 @@ def _summarize_test_output(test_output: str, limit: int = 1200) -> str:
         if not stripped:
             continue
         if (
-            stripped.startswith(("FAIL:", "ERROR:", "Traceback", "SyntaxError:", "ImportError:", "AssertionError:"))
+            stripped.startswith(
+                ("FAIL:", "ERROR:", "Traceback", "SyntaxError:", "ImportError:", "AssertionError:")
+            )
             or "FAILED" in stripped
             or "Ran 0 tests" in stripped
             or "timed out" in stripped.lower()
@@ -192,7 +200,7 @@ def plan_task(question: str, evidence: list[dict]) -> str:
         f"Retrieved evidence:\n{_format_evidence(evidence)}\n\n"
         "Return these sections only:\n"
         "1. Files\n"
-        "2. Data structures\n"
+        "2. Data structures / modules\n"
         "3. Conventions to follow\n"
         "4. Behaviour and flow\n"
         "5. Test strategy\n\n"
@@ -200,7 +208,8 @@ def plan_task(question: str, evidence: list[dict]) -> str:
         "- Extract concrete conventions from the retrieved evidence\n"
         "- Make the plan explicitly reflect retrieved file layout, style, CLI, and test conventions when present\n"
         "- Do not invent conventions that are not supported by the evidence\n"
-        "- Use unittest from the Python standard library\n"
+        "- Assume Python for implementation\n"
+        "- Use unittest from the Python standard library for generated tests\n"
         "- Make the tests discoverable by python -m unittest discover\n"
         "- Keep it compact and implementation-ready"
     )
@@ -243,7 +252,10 @@ def implement_task(
         "Hard requirements:\n"
         "- Python only\n"
         "- include or update unittest tests needed to validate the requested behaviour\n"
-        "- tests must be discoverable by python -m unittest discover from the project root\n"
+        "- use unittest only\n"
+        "- do not use pytest, pytest.ini, setup.cfg, or pyproject-based test configuration\n"
+        "- place tests either as top-level files named test_*.py or under tests/ with tests/__init__.py\n"
+        "- tests must be discoverable by python -m unittest discover\n"
         "- output the full updated file set using === filename === separators\n"
         "- do not include Markdown fences\n\n"
         "Retrieved evidence handling:\n"
@@ -279,6 +291,8 @@ def review_code(
     user_prompt = (
         f"Task: {question}\n\n"
         f"Retrieved evidence:\n{_format_evidence(evidence)}\n\n"
+        "This workflow uses unittest only.\n"
+        "Do not recommend pytest, pytest.ini, setup.cfg, or third-party test runners.\n\n"
         "Review the generated implementation. Focus on:\n"
         "- correctness\n"
         "- adherence to retrieved style and conventions\n"
@@ -354,3 +368,4 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]
         "completed_iteration": len(iterations),
         "stop_reason": stop_reason,
     }
+}
