@@ -3,6 +3,10 @@ name: deploy-indexer
 on:
   push:
     branches: ["main"]
+    paths:
+      - "indexer/**"
+      - "scripts/deploy_indexer.sh"
+      - ".github/workflows/deploy-indexer.yml"
 
 permissions:
   id-token: write

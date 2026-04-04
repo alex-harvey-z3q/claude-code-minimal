@@ -3,6 +3,10 @@ name: deploy-ingest
 on:
   push:
     branches: ["main"]
+    paths:
+      - "ingest/**"
+      - "scripts/deploy_ingest.sh"
+      - ".github/workflows/deploy-ingest.yml"
 
 permissions:
   id-token: write
