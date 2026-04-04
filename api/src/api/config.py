@@ -28,5 +28,5 @@ MAX_TOKENS = 512
 
 # Iterative workflow
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/tmp/workspace")
-MAX_WORKFLOW_ITERS = int(os.getenv("MAX_WORKFLOW_ITERS", "3"))
+MAX_WORKFLOW_ITERS = int(os.getenv("MAX_WORKFLOW_ITERS", "10"))
 TEST_TIMEOUT_SECONDS = int(os.getenv("TEST_TIMEOUT_SECONDS", "30"))
