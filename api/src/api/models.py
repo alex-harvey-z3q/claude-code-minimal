@@ -20,8 +20,19 @@ class AskResponse(BaseModel):
     evidence: list[EvidenceItem]
 
 
+class IterationInfo(BaseModel):
+    iteration: int
+    tests_passed: bool
+    major_issues: bool
+    test_output: str
+    review: str
+
+
 class WorkflowResponse(BaseModel):
     evidence: list[EvidenceItem]
     plan: str
     code: str
     review: str
+    iterations: list[IterationInfo]
+    completed_iteration: int
+    stop_reason: str

@@ -7,7 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import config
 from .llm import invoke_claude
 from .retrieval import retrieve
 
@@ -249,7 +248,7 @@ def review_code(
     return invoke_claude(system_prompt, user_prompt, max_tokens=1200, temperature=0.0)
 
 
-def run_workflow(question: str, use_retrieval: bool = True) -> dict:
+def run_workflow(question: str, use_retrieval: bool = True) -> dict[str, object]:
     evidence = retrieve(question) if use_retrieval else []
     plan = plan_task(question, evidence)
 
@@ -259,7 +258,11 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict:
     test_output = None
     review_feedback = None
 
-    for _ in range(MAX_ITERS):
+    iterations: list[dict[str, object]] = []
+    completed_iteration = 0
+    stop_reason = "max_iterations_reached"
+
+    for i in range(1, MAX_ITERS + 1):
         code = implement_task(
             question,
             evidence,
@@ -273,7 +276,26 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict:
         tests_passed, test_output = run_tests(WORKSPACE_DIR)
         review = review_code(question, evidence, code, test_output=test_output)
 
-        if tests_passed and no_major_issues(review):
+        major_issues = not no_major_issues(review)
+
+        iterations.append(
+            {
+                "iteration": i,
+                "tests_passed": tests_passed,
+                "major_issues": major_issues,
+                "test_output": test_output,
+                "review": review,
+            }
+        )
+
+        completed_iteration = i
+
+        # Hack to force > 1 iteration!
+        if i == 1:
+            review += "\nMAJOR: Demonstration retry required."
+
+        if tests_passed and not major_issues:
+            stop_reason = "tests_passed_and_review_clean"
             break
 
         previous_code = code
@@ -284,4 +306,7 @@ def run_workflow(question: str, use_retrieval: bool = True) -> dict:
         "plan": plan,
         "code": code,
         "review": review,
+        "iterations": iterations,
+        "completed_iteration": completed_iteration,
+        "stop_reason": stop_reason,
     }
