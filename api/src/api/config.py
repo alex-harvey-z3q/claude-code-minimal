@@ -6,6 +6,9 @@ AWS_REGION = "ap-southeast-2"
 BEDROCK_CHAT_MODEL_ID = "anthropic.claude-3-5-sonnet-20241022-v2:0"
 BEDROCK_EMBED_MODEL_ID = "amazon.titan-embed-text-v2:0"
 
+BEDROCK_CONNECT_TIMEOUT_SECONDS = int(os.getenv("BEDROCK_CONNECT_TIMEOUT_SECONDS", "10"))
+BEDROCK_READ_TIMEOUT_SECONDS = int(os.getenv("BEDROCK_READ_TIMEOUT_SECONDS", "300"))
+
 # Database (required from environment)
 DB_HOST = os.environ["DB_HOST"]
 DB_PORT = 5432
@@ -22,3 +25,8 @@ EMBED_DIM = int(os.environ["EMBED_DIM"])
 TOP_K = 5
 TEMPERATURE = 0.2
 MAX_TOKENS = 512
+
+# Iterative workflow
+WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/tmp/workspace")
+MAX_WORKFLOW_ITERS = int(os.getenv("MAX_WORKFLOW_ITERS", "3"))
+TEST_TIMEOUT_SECONDS = int(os.getenv("TEST_TIMEOUT_SECONDS", "30"))

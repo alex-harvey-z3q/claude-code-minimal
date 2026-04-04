@@ -5,8 +5,16 @@ from typing import Any, Mapping
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ReadTimeoutError
 
-from .config import AWS_REGION, BEDROCK_CHAT_MODEL_ID, MAX_TOKENS, TEMPERATURE
+from .config import (
+    AWS_REGION,
+    BEDROCK_CHAT_MODEL_ID,
+    BEDROCK_CONNECT_TIMEOUT_SECONDS,
+    BEDROCK_READ_TIMEOUT_SECONDS,
+    MAX_TOKENS,
+    TEMPERATURE,
+)
 
 
 @lru_cache(maxsize=1)
@@ -15,10 +23,11 @@ def get_bedrock_client():
         "bedrock-runtime",
         region_name=AWS_REGION,
         config=Config(
-            read_timeout=300,
-            connect_timeout=10,
+            connect_timeout=BEDROCK_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=BEDROCK_READ_TIMEOUT_SECONDS,
             retries={"max_attempts": 3, "mode": "standard"},
-    ))
+        ),
+    )
 
 
 def invoke_claude(
@@ -28,18 +37,23 @@ def invoke_claude(
     max_tokens: int = MAX_TOKENS,
     temperature: float = TEMPERATURE,
 ) -> str:
-    response = get_bedrock_client().converse(
-        modelId=BEDROCK_CHAT_MODEL_ID,
-        system=[{"text": system_prompt}],
-        messages=[{
-            "role": "user",
-            "content": [{"text": user_prompt}],
-        }],
-        inferenceConfig={
-            "maxTokens": max_tokens,
-            "temperature": temperature,
-        },
-    )
+    try:
+        response = get_bedrock_client().converse(
+            modelId=BEDROCK_CHAT_MODEL_ID,
+            system=[{"text": system_prompt}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"text": user_prompt}],
+                }
+            ],
+            inferenceConfig={
+                "maxTokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
+    except ReadTimeoutError as exc:
+        raise RuntimeError("Bedrock request timed out before the model returned a response.") from exc
 
     content = response["output"]["message"]["content"]
     text_parts = [part.get("text", "") for part in content if "text" in part]
