@@ -92,7 +92,7 @@ def write_files_from_response(code: str, workspace: Path) -> None:
 def run_tests(workspace: Path) -> tuple[bool, str]:
     tests_dir = workspace / "tests"
     if tests_dir.exists() and tests_dir.is_dir():
-        cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-p", "test*.py"]
+        cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test*.py"]
     else:
         cmd = [sys.executable, "-m", "unittest", "discover", "-s", ".", "-p", "test*.py"]
 
@@ -256,6 +256,8 @@ def implement_task(
         "- do not use pytest, pytest.ini, setup.cfg, or pyproject-based test configuration\n"
         "- place tests either as top-level files named test_*.py or under tests/ with tests/__init__.py\n"
         "- tests must be discoverable by python -m unittest discover\n"
+        "- if you place tests under tests/, include tests/__init__.py when needed\n"
+        "- tests must still run under python -m unittest discover -s tests -p test*.py\n"
         "- output the full updated file set using === filename === separators\n"
         "- do not include Markdown fences\n\n"
         "Retrieved evidence handling:\n"
