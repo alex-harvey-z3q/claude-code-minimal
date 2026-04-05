@@ -274,6 +274,30 @@ def _extract_review_items(review: str) -> tuple[list[str], list[str]]:
     return major_lines, minor_lines
 
 
+def _build_blocking_checklist(test_output: str, review: str) -> list[str]:
+    """Turn failures and MAJOR review items into an exact blocking checklist."""
+    checklist: list[str] = []
+
+    for line in test_output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("FAIL:", "ERROR:")):
+            checklist.append(stripped)
+
+    major_lines, _ = _extract_review_items(review)
+    checklist.extend(major_lines)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in checklist:
+        if item not in seen:
+            deduped.append(item)
+            seen.add(item)
+
+    return deduped
+
+
 def _infer_related_source_file(test_path: str, workspace: Path) -> list[str]:
     """Map a failing test file to likely source files in the workspace."""
     path = Path(test_path)
@@ -351,6 +375,14 @@ def _build_issue_summary(
 ) -> str:
     """Build the retry payload for the next implementation attempt."""
     parts = ["Files to revise:\n" + "\n".join(f"- {name}" for name in retry_files)]
+
+    blocking_checklist = _build_blocking_checklist(test_output, review)
+    if blocking_checklist:
+        parts.append(
+            "Blocking checklist for this iteration:\n"
+            + "\n".join(f"{i}. {item}" for i, item in enumerate(blocking_checklist, start=1))
+            + "\n\nClear every item in this checklist before making any optional improvements."
+        )
 
     file_block = _read_workspace_files(workspace, retry_files)
     if file_block:
@@ -469,7 +501,8 @@ def implement_task(
         "- Treat retrieved style and conventions as binding implementation guidance when present\n"
         "- Prefer retrieved file layout, naming, rendering, CLI, and test conventions over generic defaults\n"
         "- Only depart from retrieved conventions if following them would violate the task requirements\n"
-        "- Do not explain the conventions; just implement them\n\n"
+        "- Do not explain the conventions; just implement them\n"
+        "- On retry iterations, prioritize clearing the blocking checklist before addressing any non-blocking improvements\n\n"
         "Output multiple files in one plain-text response using separators like:\n"
         "=== main.py ===\n"
         "...\n"
