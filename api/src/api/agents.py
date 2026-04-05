@@ -574,7 +574,6 @@ def review_code(
 def run_workflow(
     question: str,
     use_retrieval: bool = True,
-    debug: bool = False,
 ) -> dict[str, object]:
     """Execute the full iterative coding workflow."""
     evidence = retrieve(question) if use_retrieval else []
@@ -640,13 +639,11 @@ def run_workflow(
             "test_output": test_output,
             "review": review,
             "retry_files": retry_files,
-        }
-
-        if debug:
-            iteration_record["trace"] = {
+            "trace": {
                 "implement": implement_trace,
                 "review": review_trace,
-            }
+            },
+        }
 
         iterations.append(iteration_record)
 
@@ -686,11 +683,9 @@ def run_workflow(
         "iterations": iterations,
         "completed_iteration": len(iterations),
         "stop_reason": stop_reason,
-    }
-
-    if debug:
-        response["trace"] = {
+        "trace": {
             "plan": plan_trace,
-        }
+        },
+    }
 
     return response
