@@ -254,28 +254,74 @@ def _summarize_test_output(test_output: str, limit: int = 1200) -> str:
 def _extract_review_items(review: str) -> tuple[list[str], list[str]]:
     """Split reviewer output into MAJOR and MINOR items.
 
-    Both categories are fed back into the next implementation attempt. MAJOR
-    items are blocking issues, while MINOR items capture smaller corrections or
-    improvements that should still influence later iterations.
+    Supports both of these reviewer styles:
+
+    1. Single-line items:
+       MAJOR: Missing import
+       MINOR: Add docstrings
+
+    2. Section style:
+       MAJOR:
+       - Missing import
+       - Another blocker
+       MINOR:
+       - Add docstrings
     """
     major_lines: list[str] = []
     minor_lines: list[str] = []
 
+    current_section: str | None = None
+
     for raw_line in review.splitlines():
         line = raw_line.strip()
+        if not line:
+            continue
+
+        if line == "MAJOR:":
+            current_section = "MAJOR"
+            continue
+        if line == "MINOR:":
+            current_section = "MINOR"
+            continue
+        if line == "PASS:":
+            current_section = "PASS"
+            continue
+
         if line.startswith("MAJOR:"):
-            remainder = line[len("MAJOR:"):].strip().lower()
-            if remainder.startswith("none") or remainder.startswith("no ") or remainder == "n/a":
+            remainder = line[len("MAJOR:"):].strip()
+            lowered = remainder.lower()
+            if remainder and not (
+                lowered.startswith("none") or lowered.startswith("no ") or lowered == "n/a"
+            ):
+                major_lines.append(f"MAJOR: {remainder}")
+            current_section = None
+            continue
+
+        if line.startswith("MINOR:"):
+            remainder = line[len("MINOR:"):].strip()
+            if remainder:
+                minor_lines.append(f"MINOR: {remainder}")
+            current_section = None
+            continue
+
+        if line.startswith("- "):
+            item = line[2:].strip()
+            if not item:
                 continue
-            major_lines.append(line)
-        elif line.startswith("MINOR:"):
-            minor_lines.append(line)
+            if current_section == "MAJOR":
+                lowered = item.lower()
+                if not (
+                    lowered.startswith("none") or lowered.startswith("no ") or lowered == "n/a"
+                ):
+                    major_lines.append(f"MAJOR: {item}")
+            elif current_section == "MINOR":
+                minor_lines.append(f"MINOR: {item}")
 
     return major_lines, minor_lines
 
 
 def _build_blocking_checklist(test_output: str, review: str) -> list[str]:
-    """Turn failures and MAJOR review items into an exact blocking checklist."""
+    """Turn concrete test failures and MAJOR review items into a blocking checklist."""
     checklist: list[str] = []
 
     for line in test_output.splitlines():
@@ -323,8 +369,20 @@ def _infer_related_source_file(test_path: str, workspace: Path) -> list[str]:
 
 
 def _select_retry_files(code: str, test_output: str, review: str, workspace: Path) -> list[str]:
-    """Choose a small set of files to rewrite on retry iterations."""
-    available = {filename for filename, _ in _parse_files_from_response(code)}
+    """Choose a small set of files to rewrite on retry iterations.
+
+    Selection should be based on the actual workspace, not only on the most recent
+    implementer response, because retries often emit only a subset of files.
+    """
+    if workspace.exists():
+        available = {
+            str(path.relative_to(workspace))
+            for path in workspace.rglob("*")
+            if path.is_file() and path.suffix in {".py", ".txt", ".md", ".json", ".yaml", ".yml"}
+        }
+    else:
+        available = {filename for filename, _ in _parse_files_from_response(code)}
+
     selected: list[str] = []
 
     for text in (test_output, review):
@@ -339,13 +397,15 @@ def _select_retry_files(code: str, test_output: str, review: str, workspace: Pat
                 if related in available and related not in selected:
                     selected.append(related)
 
-    if not selected:
-        preferred = [
-            filename for filename in available
-            if Path(filename).name.startswith("test_") or "tests" in Path(filename).parts
-        ]
-        non_tests = [filename for filename in available if filename not in preferred]
-        selected = sorted(preferred)[:2] + sorted(non_tests)[:2]
+    if not selected and workspace.exists():
+        py_files = sorted(
+            str(path.relative_to(workspace))
+            for path in workspace.rglob("*.py")
+            if path.is_file()
+        )
+        preferred = [name for name in py_files if Path(name).name.startswith("test_") or "tests" in Path(name).parts]
+        non_tests = [name for name in py_files if name not in preferred]
+        selected = preferred[:3] + non_tests[:3]
 
     return selected[:6]
 
