@@ -598,6 +598,11 @@ def run_workflow(
             retry_mode=retry_mode,
         )
 
+        workspace_snapshot = ""
+        blocking_checklist: list[str] = []
+        if issue_summary is not None:
+            blocking_checklist = _build_blocking_checklist("", review)
+
         try:
             if retry_mode:
                 apply_file_updates_from_response(code, WORKSPACE_ROOT)
@@ -620,6 +625,7 @@ def run_workflow(
                 test_output=test_output,
                 tests_passed=tests_passed,
             )
+            blocking_checklist = _build_blocking_checklist(test_output, review)
         except ValueError as exc:
             tests_passed = False
             test_output = f"File emission validation failed:\n{exc}"
@@ -629,16 +635,22 @@ def run_workflow(
                 "user_prompt": "",
                 "response": review,
             }
+            blocking_checklist = _build_blocking_checklist(test_output, review)
 
         has_major_issues = major_issues(review)
 
         iteration_record: dict[str, object] = {
             "iteration": iteration,
+            "retry_mode": retry_mode,
             "tests_passed": tests_passed,
             "major_issues": has_major_issues,
             "test_output": test_output,
             "review": review,
             "retry_files": retry_files,
+            "issue_summary": issue_summary,
+            "blocking_checklist": blocking_checklist,
+            "workspace_snapshot": workspace_snapshot,
+            "implement_output": code,
             "trace": {
                 "implement": implement_trace,
                 "review": review_trace,
