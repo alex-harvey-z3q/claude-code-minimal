@@ -20,12 +20,34 @@ class AskResponse(BaseModel):
     evidence: list[EvidenceItem]
 
 
+class AgentTrace(BaseModel):
+    system_prompt: str
+    user_prompt: str
+    response: str
+
+
+class IterationTrace(BaseModel):
+    implement: AgentTrace
+    review: AgentTrace
+
+
+class WorkflowTrace(BaseModel):
+    plan: AgentTrace
+
+
 class IterationInfo(BaseModel):
     iteration: int
+    retry_mode: bool
     tests_passed: bool
     major_issues: bool
     test_output: str
     review: str
+    retry_files: list[str]
+    issue_summary: str | None
+    blocking_checklist: list[str]
+    workspace_snapshot: str
+    implement_output: str
+    trace: IterationTrace
 
 
 class WorkflowResponse(BaseModel):
@@ -36,3 +58,4 @@ class WorkflowResponse(BaseModel):
     iterations: list[IterationInfo]
     completed_iteration: int
     stop_reason: str
+    trace: WorkflowTrace
