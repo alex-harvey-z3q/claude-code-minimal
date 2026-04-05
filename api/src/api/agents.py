@@ -586,40 +586,53 @@ def review_code(
     test_output: str = "",
     tests_passed: bool = False,
 ) -> tuple[str, dict[str, str]]:
-    """Ask the reviewer model for blocking vs non-blocking feedback.
+    """Ask the reviewer model for tightly constrained blocking vs non-blocking feedback.
 
     The reviewer is grounded with explicit runtime test facts so it does not
     invent contradictory claims about whether tests ran or passed.
     """
     system_prompt = (
-        "You are Reviewer, a software review agent. Review generated Python code for "
-        "correctness, completeness, and adherence to retrieved evidence. When "
-        "retrieved evidence contains implementation conventions, style guidance, file "
-        "layout guidance, testing guidance, naming guidance, or CLI conventions, "
-        "treat those conventions as the review baseline unless they conflict with the "
-        "user's explicit requirements. Be specific, concise, and deterministic."
+        "You are Reviewer, a strict software review agent. Review generated Python code for "
+        "correctness, completeness, and adherence to retrieved evidence. Be conservative. "
+        "Do not invent requirements. Do not speculate. Do not suggest optional features as blockers. "
+        "When retrieved evidence contains implementation conventions, style guidance, file "
+        "layout guidance, testing guidance, naming guidance, or CLI conventions, treat those "
+        "conventions as the review baseline only when they are clearly mandatory and do not "
+        "conflict with the user's explicit requirements."
     )
     user_prompt = (
         f"Task: {question}\n\n"
         f"Retrieved evidence:\n{_format_evidence(evidence)}\n\n"
         "This workflow uses unittest only.\n"
         "Do not recommend pytest, pytest.ini, setup.cfg, or third-party test runners.\n"
-        "Do not infer or guess test execution facts. Use the authoritative runtime test facts below as ground truth.\n"
-        "Only mark something as MAJOR if it is a blocking defect relative to the explicit task requirements or retrieved evidence.\n"
-        "Use MINOR for smaller defects, polish issues, non-blocking gaps, or quality improvements that should still influence a later revision.\n"
-        "Do not mark optional enhancements, nice-to-haves, future improvements, or speculative features as MAJOR.\n\n"
+        "Do not infer or guess test execution facts. Use the authoritative runtime test facts below as ground truth.\n\n"
+        "Strict MAJOR rules:\n"
+        "- Only mark something as MAJOR if it is a blocking defect caused by one of:\n"
+        "  1. a failing test,\n"
+        "  2. a direct contradiction of the explicit user request, or\n"
+        "  3. a direct contradiction of mandatory retrieved evidence.\n"
+        "- If tests pass, assume the implementation is acceptable unless you can point to a specific unmet explicit requirement or mandatory evidence requirement.\n"
+        "- Do not invent requirements.\n"
+        "- Do not treat robustness improvements, common extensions, custom board sizes, extra validation, timers, question marks, chording, or other nice-to-haves as MAJOR unless they were explicitly required.\n"
+        "- Missing optional features, polish, extra safeguards, or common features must be MINOR, not MAJOR.\n"
+        "- Do not mark something MAJOR just because it 'could' be improved or is 'commonly' present.\n\n"
         f"{_build_test_status(test_output, tests_passed)}\n\n"
         "Review the generated implementation. Focus on:\n"
         "- correctness\n"
-        "- adherence to retrieved style and conventions\n"
-        "- mismatches with retrieved requirements or behaviour\n"
-        "- edge cases\n"
+        "- adherence to explicit task requirements\n"
+        "- contradictions with mandatory retrieved evidence\n"
+        "- edge cases that actually violate the task\n"
         "- structure and readability\n"
         "- test coverage for required behaviour\n\n"
         "Return short bullet points only. Prefix each bullet with one of:\n"
         "- PASS:\n"
         "- MINOR:\n"
         "- MAJOR:\n\n"
+        "For every MAJOR item, start the text with one of these labels:\n"
+        "- MAJOR: FAILING_TEST - ...\n"
+        "- MAJOR: USER_REQUIREMENT - ...\n"
+        "- MAJOR: MANDATORY_EVIDENCE - ...\n\n"
+        "If you cannot justify a MAJOR item with one of those three labels, it must be MINOR instead.\n\n"
         f"Raw test output:\n{test_output or 'No test output.'}\n\n"
         f"Code:\n{code}"
     )
