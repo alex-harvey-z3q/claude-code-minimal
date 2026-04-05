@@ -109,7 +109,7 @@ def write_files_from_response(code: str, workspace: Path) -> None:
         destination.write_text(body, encoding="utf-8")
 
 
-def apply_file_updates_from_response(code: str, workspace: Path) -> None:
+def patch_files_from_response(code: str, workspace: Path) -> None:
     """Apply only the emitted files onto the existing workspace."""
     files = _parse_files_from_response(code)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -434,9 +434,11 @@ def _build_issue_summary(
     review: str,
 ) -> str:
     """Build the retry payload for the next implementation attempt."""
+
     parts = ["Files to revise:\n" + "\n".join(f"- {name}" for name in retry_files)]
 
     blocking_checklist = _build_blocking_checklist(test_output, review)
+
     if blocking_checklist:
         parts.append(
             "Blocking checklist for this iteration:\n"
@@ -445,6 +447,7 @@ def _build_issue_summary(
         )
 
     file_block = _read_workspace_files(workspace, retry_files)
+
     if file_block:
         parts.append(f"Current file contents:\n{file_block}")
 
@@ -649,20 +652,40 @@ def run_workflow(
     use_retrieval: bool = True,
 ) -> dict[str, object]:
     """Execute the full iterative coding workflow."""
+
+    # Retrieval is optional so the same loop can be used both with and without
+    # the RAG. That makes it easier to separate "retrieval quality" problems from
+    # "agent loop" problems when debugging.
     evidence = retrieve(question) if use_retrieval else []
+
+    # Invoke the Planner and receive its response along with its prompts for
+    # debugging.
     plan, plan_trace = plan_task(question, evidence)
 
+    # The workspace is the loop's external memory. Each iteration writes code
+    # to disk, runs tests against real files, and then reads those files back
+    # for review and for the next retry prompt.
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 
+    # These variables track the latest state of the loop. The final response
+    # returns the last successful-or-not attempt plus the full per-iteration log.
     code = ""
     review = ""
+
     issue_summary: str | None = None
     retry_files: list[str] = []
     iterations: list[dict[str, object]] = []
+
     stop_reason = "max_iterations_reached"
 
     for iteration in range(1, MAX_ITERS + 1):
+        # Iteration 1 is a full generation from the task + evidence + plan.
+        # Later iterations switch into patch mode, where the implementer is
+        # asked to revise only a targeted subset of files.
         retry_mode = iteration > 1
+
+        # Invoke the Implementer and receive its code along with its prompts
+        # for debugging.
         code, implement_trace = implement_task(
             question,
             evidence,
@@ -673,16 +696,29 @@ def run_workflow(
 
         workspace_snapshot = ""
         blocking_checklist: list[str] = []
+
+        # If we already have reviewer feedback from a previous iteration, build
+        # an initial checklist before execution. This makes the current retry's
+        # intended targets visible in the trace even before tests run again.
         if issue_summary is not None:
             blocking_checklist = _build_blocking_checklist("", review)
 
         try:
+            # First pass replaces the whole workspace. Retries apply only the
+            # emitted files, which is what turns the loop from "regenerate from
+            # scratch" into a more Claude Code–style patch-and-retest cycle.
             if retry_mode:
-                apply_file_updates_from_response(code, WORKSPACE_ROOT)
+                patch_files_from_response(code, WORKSPACE_ROOT)
             else:
                 write_files_from_response(code, WORKSPACE_ROOT)
 
+            # Tests are the authoritative runtime signal. They matter more than
+            # the reviewer because they execute the actual code that was written.
             tests_passed, test_output = run_tests(WORKSPACE_ROOT)
+
+            # Read the real workspace back from disk rather than trusting the
+            # raw model output. This ensures the reviewer sees exactly what the
+            # test runner saw.
             workspace_snapshot = _read_workspace_files(
                 WORKSPACE_ROOT,
                 sorted(
@@ -691,6 +727,11 @@ def run_workflow(
                     if path.is_file()
                 ),
             )
+
+            # Invoke the Reviewer. The Reviewer is a secondary judge, not the
+            # source of truth. Its role is to catch issues that tests missed,
+            # while being constrained by explicit runtime facts from the test
+            # runner.
             review, review_trace = review_code(
                 question,
                 evidence,
@@ -698,8 +739,15 @@ def run_workflow(
                 test_output=test_output,
                 tests_passed=tests_passed,
             )
+
+            # Turn test failures and blocking review items into a compact
+            # checklist that can be fed into the next retry prompt.
             blocking_checklist = _build_blocking_checklist(test_output, review)
+
         except ValueError as exc:
+            # File-emission problems are treated like blocking failures too.
+            # This catches malformed model output such as missing file bodies or
+            # broken separators before the test runner even starts.
             tests_passed = False
             test_output = f"File emission validation failed:\n{exc}"
             review = f"MAJOR: {exc}"
@@ -710,8 +758,14 @@ def run_workflow(
             }
             blocking_checklist = _build_blocking_checklist(test_output, review)
 
+        # The stop decision is deliberately simple: green tests plus no blocking
+        # review findings. In practice, a lot of the orchestration work is about
+        # making sure "MAJOR" really means "blocking" and not "nice to have".
         has_major_issues = major_issues(review)
 
+        # Capture everything needed to debug the loop after the fact. This is
+        # the audit trail: prompts, outputs, runtime results, selected retry
+        # files, and the exact checklist used to drive the next iteration.
         iteration_record: dict[str, object] = {
             "iteration": iteration,
             "retry_mode": retry_mode,
@@ -732,10 +786,15 @@ def run_workflow(
 
         iterations.append(iteration_record)
 
+        # Convergence means both judges agree: the tests are green and the
+        # reviewer has no grounded blocking objections.
         if tests_passed and not has_major_issues:
             stop_reason = "tests_passed_and_review_clean"
             break
 
+        # If not done, choose a small set of files to revise next time rather
+        # than replaying the entire codebase. This is one of the main practical
+        # tricks for keeping prompt size under control in an iterative agent.
         retry_files = _select_retry_files(
             _read_workspace_files(
                 WORKSPACE_ROOT,
@@ -749,8 +808,13 @@ def run_workflow(
             review,
             WORKSPACE_ROOT,
         )
+
+        # Build a condensed retry payload from the latest failures and review.
+        # This is the feedback channel that turns the workflow into a loop.
         issue_summary = _build_issue_summary(WORKSPACE_ROOT, retry_files, test_output, review)
 
+    # Return the final workspace state, not just the last raw implementer
+    # response. That makes the API response match the code that actually ran.
     final_code = _read_workspace_files(
         WORKSPACE_ROOT,
         sorted(
