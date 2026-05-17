@@ -6,10 +6,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 from .config import MAX_WORKFLOW_ITERS, TEST_TIMEOUT_SECONDS, WORKSPACE_DIR
-from .llm import invoke_claude
+from .llm import invoke_claude, invoke_claude_with_tools
 from .retrieval import retrieve
+from .sandbox import SandboxSession, truncate_tool_result
 
 MAX_ITERS = MAX_WORKFLOW_ITERS
 WORKSPACE_ROOT = Path(WORKSPACE_DIR)
@@ -446,10 +448,8 @@ def _build_issue_summary(
             + "\n\nClear every item in this checklist before making any optional improvements."
         )
 
-    file_block = _read_workspace_files(workspace, retry_files)
-
-    if file_block:
-        parts.append(f"Current file contents:\n{file_block}")
+    if retry_files:
+        parts.append("Use the read_file tool to inspect those files before editing them.")
 
     if test_output.strip():
         parts.append(f"Test failures:\n{_summarize_test_output(test_output)}")
@@ -462,6 +462,31 @@ def _build_issue_summary(
         parts.append("Non-blocking review feedback:\n" + "\n".join(minor_lines))
 
     return "\n\n".join(parts).strip()
+
+
+def _truncating_handler(handler: Callable[..., str]) -> Callable[..., str]:
+    def wrapped(**kwargs: Any) -> str:
+        return truncate_tool_result(handler(**kwargs))
+
+    return wrapped
+
+
+def _format_tool_trace(tool_trace: dict[str, Any]) -> str:
+    lines = []
+    for index, call in enumerate(tool_trace.get("tool_calls", []), start=1):
+        tool_input = dict(call.get("input") or {})
+        if "content" in tool_input:
+            content = str(tool_input["content"])
+            tool_input["content"] = f"<redacted {len(content)} characters>"
+        result = call.get("result", "")
+        if isinstance(result, str):
+            result = truncate_tool_result(result)
+        lines.append(
+            f"{index}. {call.get('name')} status={call.get('status')}\n"
+            f"input={tool_input}\n"
+            f"result={result}"
+        )
+    return "\n\n".join(lines)
 
 
 def plan_task(question: str, evidence: list[dict]) -> tuple[str, dict[str, str]]:
@@ -509,41 +534,41 @@ def implement_task(
     question: str,
     evidence: list[dict],
     plan: str,
+    sandbox: SandboxSession,
     *,
     issue_summary: str | None = None,
     retry_mode: bool = False,
 ) -> tuple[str, dict[str, str]]:
-    """Ask the implementer model to generate the full multi-file code response.
+    """Ask the implementer model to edit the sandbox through host tools.
 
-    On the first iteration this uses only the task, evidence, and plan. On later
-    iterations it includes the previous code together with compact test and
-    review feedback so the model can revise the concrete artifact instead of
-    regenerating from scratch.
+    The model no longer returns file bodies as its primary output. It mutates
+    the sandbox with write_file/delete_file and uses run_tests for feedback.
     """
     system_prompt = (
-        "You are Implementer, a Python coding agent. Generate a complete, runnable "
-        "Python implementation for the requested task. When retrieved evidence "
+        "You are Implementer, a Python coding agent with access to a sandboxed "
+        "workspace through tools. Create and edit files by calling tools; do not "
+        "paste file contents into your final answer. When retrieved evidence "
         "contains implementation conventions, style guidance, file layout guidance, "
         "testing guidance, naming guidance, or CLI conventions, you must follow that "
         "guidance unless it conflicts with the user's explicit requirements. Do not "
         "silently replace retrieved conventions with your own defaults. Use "
         "retrieved domain evidence for task requirements and expected behaviour. "
-        "Output only code files using the exact separator format === filename ===. "
-        "Do not include any prose before, between, or after files. Do not wrap files "
-        "in Markdown code fences."
+        "Before you finish, run the tests with the run_tests tool. If tests fail, "
+        "edit the workspace and run them again. Finish with a concise summary and "
+        "never include full source files in the final response."
     )
 
     if retry_mode:
         feedback_block = (
-            "Revise only the files listed below. Preserve all other files in the "
-            "workspace unchanged. Return only the updated files, using the same "
-            "=== filename === format.\n\n"
+            "Revise only the files listed below unless a test failure proves another "
+            "file must change. Preserve all other files in the workspace unchanged. "
+            "Use read_file before editing existing files.\n\n"
             f"{issue_summary}\n\n"
         )
-        generation_instruction = "Generate the updated files now.\n\n"
+        generation_instruction = "Update the sandbox files now.\n\n"
     else:
         feedback_block = ""
-        generation_instruction = "Generate the full implementation now.\n\n"
+        generation_instruction = "Create the full implementation in the sandbox now.\n\n"
 
     user_prompt = (
         f"Task: {question}\n\n"
@@ -558,33 +583,37 @@ def implement_task(
         "- do not use pytest, pytest.ini, setup.cfg, or pyproject-based test configuration\n"
         "- place tests either as top-level files named test_*.py or under tests/\n"
         "- tests must be discoverable by python -m unittest discover\n"
-        "- output files using === filename === separators\n"
-        "- do not include Markdown fences\n\n"
+        "- use write_file/delete_file to change files\n"
+        "- use run_tests before finishing\n"
+        "- do not include source file bodies in your final text\n\n"
         "Retrieved evidence handling:\n"
         "- Treat retrieved style and conventions as binding implementation guidance when present\n"
         "- Prefer retrieved file layout, naming, rendering, CLI, and test conventions over generic defaults\n"
         "- Only depart from retrieved conventions if following them would violate the task requirements\n"
         "- Do not explain the conventions; just implement them\n"
-        "- On retry iterations, prioritize clearing the blocking checklist before addressing any non-blocking improvements\n\n"
-        "Output multiple files in one plain-text response using separators like:\n"
-        "=== main.py ===\n"
-        "...\n"
-        "=== module.py ===\n"
-        "...\n"
-        "=== test_module.py ==="
+        "- On retry iterations, prioritize clearing the blocking checklist before addressing any non-blocking improvements"
     )
-    response = invoke_claude(system_prompt, user_prompt, max_tokens=4500, temperature=0.0)
+    tools, handlers = sandbox.tools(read_only=False)
+    response, tool_trace = invoke_claude_with_tools(
+        system_prompt,
+        user_prompt,
+        tools=tools,
+        handlers={name: _truncating_handler(handler) for name, handler in handlers.items()},
+        max_tokens=4500,
+        temperature=0.0,
+    )
     return response, {
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
         "response": response,
+        "tool_calls": _format_tool_trace(tool_trace),
     }
 
 
 def review_code(
     question: str,
     evidence: list[dict],
-    code: str,
+    sandbox: SandboxSession,
     *,
     test_output: str = "",
     tests_passed: bool = False,
@@ -595,9 +624,11 @@ def review_code(
     invent contradictory claims about whether tests ran or passed.
     """
     system_prompt = (
-        "You are Reviewer, a strict software review agent. Review generated Python code for "
-        "correctness, completeness, and adherence to retrieved evidence. Be conservative. "
-        "Do not invent requirements. Do not speculate. Do not suggest optional features as blockers. "
+        "You are Reviewer, a strict software review agent. Review the Python code "
+        "in the sandbox workspace for correctness, completeness, and adherence to "
+        "retrieved evidence. Use list_files and read_file when you need to inspect "
+        "code. Be conservative. Do not invent requirements. Do not speculate. Do "
+        "not suggest optional features as blockers. "
         "When retrieved evidence contains implementation conventions, style guidance, file "
         "layout guidance, testing guidance, naming guidance, or CLI conventions, treat those "
         "conventions as the review baseline only when they are clearly mandatory and do not "
@@ -637,13 +668,23 @@ def review_code(
         "- MAJOR: MANDATORY_EVIDENCE - ...\n\n"
         "If you cannot justify a MAJOR item with one of those three labels, it must be MINOR instead.\n\n"
         f"Raw test output:\n{test_output or 'No test output.'}\n\n"
-        f"Code:\n{code}"
+        f"Workspace files:\n{sandbox.list_files()}\n\n"
+        "Inspect only the files you need. Return your review after inspection."
     )
-    response = invoke_claude(system_prompt, user_prompt, max_tokens=1000, temperature=0.0)
+    tools, handlers = sandbox.tools(read_only=True)
+    response, tool_trace = invoke_claude_with_tools(
+        system_prompt,
+        user_prompt,
+        tools=tools,
+        handlers={name: _truncating_handler(handler) for name, handler in handlers.items()},
+        max_tokens=1000,
+        temperature=0.0,
+    )
     return response, {
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
         "response": response,
+        "tool_calls": _format_tool_trace(tool_trace),
     }
 
 
@@ -662,10 +703,10 @@ def run_workflow(
     # debugging.
     plan, plan_trace = plan_task(question, evidence)
 
-    # The workspace is the loop's external memory. Each iteration writes code
-    # to disk, runs tests against real files, and then reads those files back
-    # for review and for the next retry prompt.
-    WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    # The sandbox is the loop's external memory. Each workflow gets a fresh
+    # workspace so concurrent requests cannot trample each other's files.
+    sandbox = SandboxSession(Path(WORKSPACE_DIR))
+    sandbox.reset()
 
     # These variables track the latest state of the loop. The final response
     # returns the last successful-or-not attempt plus the full per-iteration log.
@@ -690,6 +731,7 @@ def run_workflow(
             question,
             evidence,
             plan,
+            sandbox,
             issue_summary=issue_summary,
             retry_mode=retry_mode,
         )
@@ -704,29 +746,13 @@ def run_workflow(
             blocking_checklist = _build_blocking_checklist("", review)
 
         try:
-            # First pass replaces the whole workspace. Retries apply only the
-            # emitted files, which is what turns the loop from "regenerate from
-            # scratch" into a more Claude Code–style patch-and-retest cycle.
-            if retry_mode:
-                patch_files_from_response(code, WORKSPACE_ROOT)
-            else:
-                write_files_from_response(code, WORKSPACE_ROOT)
-
             # Tests are the authoritative runtime signal. They matter more than
             # the reviewer because they execute the actual code that was written.
-            tests_passed, test_output = run_tests(WORKSPACE_ROOT)
+            tests_passed, test_output = sandbox.run_tests()
 
-            # Read the real workspace back from disk rather than trusting the
-            # raw model output. This ensures the reviewer sees exactly what the
-            # test runner saw.
-            workspace_snapshot = _read_workspace_files(
-                WORKSPACE_ROOT,
-                sorted(
-                    str(path.relative_to(WORKSPACE_ROOT))
-                    for path in WORKSPACE_ROOT.rglob("*.py")
-                    if path.is_file()
-                ),
-            )
+            # Snapshot is kept for API trace/debugging. It is not fed back to
+            # the implementer; retries inspect files through tools.
+            workspace_snapshot = sandbox.snapshot()
 
             # Invoke the Reviewer. The Reviewer is a secondary judge, not the
             # source of truth. Its role is to catch issues that tests missed,
@@ -735,7 +761,7 @@ def run_workflow(
             review, review_trace = review_code(
                 question,
                 evidence,
-                workspace_snapshot,
+                sandbox,
                 test_output=test_output,
                 tests_passed=tests_passed,
             )
@@ -796,38 +822,25 @@ def run_workflow(
         # than replaying the entire codebase. This is one of the main practical
         # tricks for keeping prompt size under control in an iterative agent.
         retry_files = _select_retry_files(
-            _read_workspace_files(
-                WORKSPACE_ROOT,
-                sorted(
-                    str(path.relative_to(WORKSPACE_ROOT))
-                    for path in WORKSPACE_ROOT.rglob("*.py")
-                    if path.is_file()
-                ),
-            ),
+            sandbox.snapshot(),
             test_output,
             review,
-            WORKSPACE_ROOT,
+            sandbox.root,
         )
 
         # Build a condensed retry payload from the latest failures and review.
         # This is the feedback channel that turns the workflow into a loop.
-        issue_summary = _build_issue_summary(WORKSPACE_ROOT, retry_files, test_output, review)
+        issue_summary = _build_issue_summary(sandbox.root, retry_files, test_output, review)
 
     # Return the final workspace state, not just the last raw implementer
     # response. That makes the API response match the code that actually ran.
-    final_code = _read_workspace_files(
-        WORKSPACE_ROOT,
-        sorted(
-            str(path.relative_to(WORKSPACE_ROOT))
-            for path in WORKSPACE_ROOT.rglob("*.py")
-            if path.is_file()
-        ),
-    )
+    final_code = sandbox.snapshot()
 
     response: dict[str, object] = {
         "evidence": evidence,
         "plan": plan,
         "code": final_code,
+        "workspace_id": sandbox.run_id,
         "review": review,
         "iterations": iterations,
         "completed_iteration": len(iterations),

@@ -24,6 +24,7 @@ class AgentTrace(BaseModel):
     system_prompt: str
     user_prompt: str
     response: str
+    tool_calls: str | None = None
 
 
 class IterationTrace(BaseModel):
@@ -54,6 +55,7 @@ class WorkflowResponse(BaseModel):
     evidence: list[EvidenceItem]
     plan: str
     code: str
+    workspace_id: str | None = None
     review: str
     iterations: list[IterationInfo]
     completed_iteration: int
