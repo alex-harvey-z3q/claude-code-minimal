@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-import os
 import re
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import MAX_WORKFLOW_ITERS, TEST_TIMEOUT_SECONDS, WORKSPACE_DIR
+from .config import MAX_WORKFLOW_ITERS, WORKSPACE_DIR
 from .llm import ToolLoopError, invoke_claude, invoke_claude_with_tools
-from .sandbox import SandboxSession, truncate_tool_result
+from .sandbox import TRACE_FILENAME, SandboxSession, truncate_tool_result
 
 MAX_ITERS = MAX_WORKFLOW_ITERS
-WORKSPACE_ROOT = Path(WORKSPACE_DIR)
-_FILE_HEADER_RE = re.compile(r"^===\s*(?P<filename>.+?)\s*===\s*$", re.MULTILINE)
 _PATH_RE = re.compile(r"(?P<path>[\w./-]+\.(?:py|txt|md|json|yaml|yml))")
 
 
@@ -35,142 +29,6 @@ def _format_evidence(evidence: list[dict]) -> str:
             f"Excerpt: {item['excerpt']}"
         )
     return "\n\n".join(parts)
-
-
-def _normalize_file_body(filename: str, body: str) -> str:
-    """Normalize one emitted file body before it is written to disk.
-
-    The implementer is instructed to return plain file contents, but models may
-    still wrap files in Markdown fences. This helper strips those fences, allows
-    intentionally empty __init__.py files, and rejects obviously broken outputs
-    such as incomplete fences or empty non-package files.
-    """
-    content = body.lstrip("\n").rstrip()
-
-    if content.startswith("```"):
-        lines = content.splitlines()
-        lines = lines[1:]
-        if not lines or lines[-1].strip() != "```":
-            raise ValueError(f"Incomplete Markdown code fence in {filename}")
-        content = "\n".join(lines[:-1]).rstrip()
-
-    if not content.strip():
-        if Path(filename).name == "__init__.py":
-            return ""
-        raise ValueError(f"Empty file body for {filename}")
-
-    return content + "\n"
-
-
-def _parse_files_from_response(code: str) -> list[tuple[str, str]]:
-    """Parse a multi-file model response into ``(filename, body)`` pairs.
-
-    The workflow expects the implementer to emit files using the format
-    ``=== filename ===``. This function validates that structure, normalizes
-    each body, and enforces a minimal sanity check that the response contains
-    more than one file and at least one test file.
-    """
-    matches = list(_FILE_HEADER_RE.finditer(code))
-    if not matches:
-        raise ValueError("Implementer output did not contain any === filename === blocks.")
-
-    files: list[tuple[str, str]] = []
-    for index, match in enumerate(matches):
-        filename = match.group("filename").strip()
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(code)
-        body = code[start:end]
-        files.append((filename, _normalize_file_body(filename, body)))
-
-    if len(files) < 1:
-        raise ValueError("Implementer output must contain at least one file")
-
-    return files
-
-
-def write_files_from_response(code: str, workspace: Path) -> None:
-    """Replace the workspace contents with files emitted by the implementer.
-
-    Each iteration starts from a clean workspace so the test run reflects only
-    the current candidate solution. Paths are validated to prevent the model
-    from writing outside the sandbox directory.
-    """
-    files = _parse_files_from_response(code)
-
-    if workspace.exists():
-        shutil.rmtree(workspace)
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    workspace_root = workspace.resolve()
-    for filename, body in files:
-        destination = (workspace / filename).resolve()
-        if workspace_root != destination and workspace_root not in destination.parents:
-            raise ValueError(f"Refusing to write outside workspace: {filename}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(body, encoding="utf-8")
-
-
-def patch_files_from_response(code: str, workspace: Path) -> None:
-    """Apply only the emitted files onto the existing workspace."""
-    files = _parse_files_from_response(code)
-    workspace.mkdir(parents=True, exist_ok=True)
-    workspace_root = workspace.resolve()
-
-    for filename, body in files:
-        destination = (workspace / filename).resolve()
-        if workspace_root != destination and workspace_root not in destination.parents:
-            raise ValueError(f"Refusing to write outside workspace: {filename}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(body, encoding="utf-8")
-
-
-def run_tests(workspace: Path) -> tuple[bool, str]:
-    """Run unittest discovery inside the generated workspace."""
-    tests_dir = workspace / "tests"
-    if tests_dir.exists() and tests_dir.is_dir():
-        cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test*.py"]
-    else:
-        cmd = [sys.executable, "-m", "unittest", "discover", "-s", ".", "-p", "test*.py"]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=TEST_TIMEOUT_SECONDS,
-            env={**os.environ, "PYTHONPATH": str(workspace)},
-        )
-
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", errors="replace")
-
-        output = "\n\n".join(
-            part for part in [stdout.strip(), stderr.strip()] if part
-        ) or "Tests timed out."
-        return False, f"Test run timed out after {TEST_TIMEOUT_SECONDS} seconds.\n\n{output}"
-
-    except Exception as exc:
-        return False, f"Test runner failed to start:\n{exc}"
-
-    output_parts = []
-    if result.stdout.strip():
-        output_parts.append(result.stdout.strip())
-    if result.stderr.strip():
-        output_parts.append(result.stderr.strip())
-    output = "\n\n".join(output_parts).strip() or "No test output captured."
-
-    if "Ran 0 tests" in output:
-        return False, output
-
-    return result.returncode == 0, output
 
 
 def _parse_test_run_count(test_output: str) -> int:
@@ -369,20 +227,19 @@ def _infer_related_source_file(test_path: str, workspace: Path) -> list[str]:
     return []
 
 
-def _select_retry_files(code: str, test_output: str, review: str, workspace: Path) -> list[str]:
+def _select_retry_files(test_output: str, review: str, workspace: Path) -> list[str]:
     """Choose a small set of files to rewrite on retry iterations.
 
     Selection should be based on the actual workspace, not only on the most recent
     implementer response, because retries often emit only a subset of files.
     """
-    if workspace.exists():
-        available = {
-            str(path.relative_to(workspace))
-            for path in workspace.rglob("*")
-            if path.is_file() and path.suffix in {".py", ".txt", ".md", ".json", ".yaml", ".yml"}
-        }
-    else:
-        available = {filename for filename, _ in _parse_files_from_response(code)}
+    available = {
+        str(path.relative_to(workspace))
+        for path in workspace.rglob("*")
+        if path.is_file()
+        and path.name != TRACE_FILENAME
+        and path.suffix in {".py", ".txt", ".md", ".json", ".yaml", ".yml"}
+    }
 
     selected: list[str] = []
 
@@ -398,7 +255,7 @@ def _select_retry_files(code: str, test_output: str, review: str, workspace: Pat
                 if related in available and related not in selected:
                     selected.append(related)
 
-    if not selected and workspace.exists():
+    if not selected:
         py_files = sorted(
             str(path.relative_to(workspace))
             for path in workspace.rglob("*.py")
@@ -411,25 +268,7 @@ def _select_retry_files(code: str, test_output: str, review: str, workspace: Pat
     return selected[:6]
 
 
-def _read_workspace_files(workspace: Path, filenames: list[str]) -> str:
-    """Read a subset of workspace files back into prompt format."""
-    blocks = []
-    workspace_root = workspace.resolve()
-
-    for filename in filenames:
-        path = (workspace / filename).resolve()
-        if workspace_root != path and workspace_root not in path.parents:
-            continue
-        if not path.exists():
-            continue
-        content = path.read_text(encoding="utf-8")
-        blocks.append(f"=== {filename} ===\n{content.rstrip()}\n")
-
-    return "\n".join(blocks).strip()
-
-
 def _build_issue_summary(
-    workspace: Path,
     retry_files: list[str],
     test_output: str,
     review: str,
@@ -796,7 +635,7 @@ def run_workflow(
 
     # These variables track the latest state of the loop. The final response
     # returns the last successful-or-not attempt plus the full per-iteration log.
-    code = ""
+    implement_output = ""
     review = ""
 
     issue_summary: str | None = None
@@ -808,10 +647,11 @@ def run_workflow(
         # asked to revise only a targeted subset of files.
         retry_mode = iteration > 1
 
-        # Invoke the Implementer and receive its code along with its prompts
-        # for debugging.
+        # Invoke the Implementer and receive its final text along with its
+        # prompts/tool trace for debugging. File changes happen through sandbox
+        # tools, not by parsing this text.
         try:
-            code, implement_trace = implement_task(
+            implement_output, implement_trace = implement_task(
                 question,
                 evidence,
                 plan,
@@ -896,11 +736,11 @@ def run_workflow(
             blocking_checklist = _build_blocking_checklist(test_output, review)
 
         except ValueError as exc:
-            # File-emission problems are treated like blocking failures too.
-            # This catches malformed model output such as missing file bodies or
-            # broken separators before the test runner even starts.
+            # Sandbox validation problems are treated like blocking failures too.
+            # This catches invalid paths or other local execution issues before
+            # the reviewer has a chance to inspect the workspace.
             tests_passed = False
-            test_output = f"File emission validation failed:\n{exc}"
+            test_output = f"Sandbox validation failed:\n{exc}"
             review = f"MAJOR: {exc}"
             review_trace = {
                 "system_prompt": "",
@@ -928,7 +768,7 @@ def run_workflow(
             "issue_summary": issue_summary,
             "blocking_checklist": blocking_checklist,
             "workspace_snapshot": workspace_snapshot,
-            "implement_output": code,
+            "implement_output": implement_output,
             "trace": {
                 "implement": implement_trace,
                 "review": review_trace,
@@ -959,7 +799,6 @@ def run_workflow(
         # than replaying the entire codebase. This is one of the main practical
         # tricks for keeping prompt size under control in an iterative agent.
         retry_files = _select_retry_files(
-            sandbox.snapshot(),
             test_output,
             review,
             sandbox.root,
@@ -967,7 +806,7 @@ def run_workflow(
 
         # Build a condensed retry payload from the latest failures and review.
         # This is the feedback channel that turns the workflow into a loop.
-        issue_summary = _build_issue_summary(sandbox.root, retry_files, test_output, review)
+        issue_summary = _build_issue_summary(retry_files, test_output, review)
 
     # Return the final workspace state, not just the last raw implementer
     # response. That makes the API response match the code that actually ran.

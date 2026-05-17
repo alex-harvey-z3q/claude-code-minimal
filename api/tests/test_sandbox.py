@@ -51,6 +51,21 @@ class SandboxSessionTest(unittest.TestCase):
             self.assertIn('"stop_reason": "debug"', trace)
             self.assertIn('"name": "run_tests"', trace)
 
+    def test_trace_file_is_hidden_from_workspace_tools_and_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = SandboxSession(Path(tmpdir), run_id="run")
+            sandbox.write_file("hello.py", "VALUE = 1\n")
+            sandbox.write_trace({"stop_reason": "debug"})
+
+            self.assertEqual(sandbox.list_files(), "hello.py")
+            self.assertNotIn("agent_trace.json", sandbox.relative_files())
+            self.assertNotIn("agent_trace.json", sandbox.snapshot())
+
+            with self.assertRaises(ValueError):
+                sandbox.read_file("agent_trace.json")
+            with self.assertRaises(ValueError):
+                sandbox.list_files("agent_trace.json")
+
 
 if __name__ == "__main__":
     unittest.main()

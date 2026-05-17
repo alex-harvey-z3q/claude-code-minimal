@@ -15,6 +15,7 @@ from .config import TEST_TIMEOUT_SECONDS, WORKSPACE_DIR
 TEXT_SUFFIXES = {".py", ".txt", ".md", ".json", ".yaml", ".yml"}
 MAX_FILE_CHARS = 80_000
 MAX_TOOL_RESULT_CHARS = 12_000
+TRACE_FILENAME = "agent_trace.json"
 
 
 @dataclass(frozen=True)
@@ -50,13 +51,16 @@ class SandboxSession:
             raise ValueError(f"Refusing to access path outside sandbox: {path}")
         return candidate
 
+    def _is_internal_path(self, path: Path) -> bool:
+        return path.resolve() == self.trace_path().resolve()
+
     def relative_files(self) -> list[str]:
         if not self.root.exists():
             return []
         return sorted(
             str(path.relative_to(self.root))
             for path in self.root.rglob("*")
-            if path.is_file()
+            if path.is_file() and not self._is_internal_path(path)
         )
 
     def list_files(self, path: str = ".") -> str:
@@ -64,17 +68,21 @@ class SandboxSession:
         if not base.exists():
             return f"No such path: {path}"
         if base.is_file():
+            if self._is_internal_path(base):
+                raise ValueError(f"Refusing to list internal sandbox file: {path}")
             return str(base.relative_to(self.root))
 
         files = [
             str(child.relative_to(self.root))
             for child in base.rglob("*")
-            if child.is_file()
+            if child.is_file() and not self._is_internal_path(child)
         ]
         return "\n".join(sorted(files)) or "No files."
 
     def read_file(self, path: str) -> str:
         file_path = self.resolve(path)
+        if self._is_internal_path(file_path):
+            raise ValueError(f"Refusing to read internal sandbox file: {path}")
         if not file_path.exists():
             raise ValueError(f"No such file: {path}")
         if not file_path.is_file():
@@ -89,6 +97,8 @@ class SandboxSession:
 
     def write_file(self, path: str, content: str) -> str:
         file_path = self.resolve(path)
+        if self._is_internal_path(file_path):
+            raise ValueError(f"Refusing to write internal sandbox file: {path}")
         if file_path.suffix not in TEXT_SUFFIXES:
             raise ValueError(f"Refusing to write unsupported file type: {path}")
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,6 +107,8 @@ class SandboxSession:
 
     def delete_file(self, path: str) -> str:
         file_path = self.resolve(path)
+        if self._is_internal_path(file_path):
+            raise ValueError(f"Refusing to delete internal sandbox file: {path}")
         if not file_path.exists():
             return f"No such file: {path}"
         if not file_path.is_file():
@@ -244,7 +256,7 @@ class SandboxSession:
         return tool_specs, handlers
 
     def trace_path(self) -> Path:
-        return self.root / "agent_trace.json"
+        return self.root / TRACE_FILENAME
 
     def write_trace(self, trace: dict[str, Any]) -> None:
         self.trace_path().write_text(
