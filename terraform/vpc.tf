@@ -46,7 +46,7 @@ resource "aws_route_table_association" "public_assoc" {
   route_table_id = aws_route_table.public.id
 }
 
-# NAT for private subnets (so ECS can reach Wikipedia/OpenAI)
+# NAT for private subnets (so ECS can reach Wikipedia, S3, ECR, and Bedrock)
 resource "aws_eip" "nat" {
   domain = "vpc"
 }

@@ -1,13 +1,15 @@
-# wiki-rag-bedrock
+# claude-code-minimal
 
-Terraform + ECS Fargate pipeline that:
-1) ingests Wikipedia content into S3
-2) indexes into Postgres (pgvector)
-3) serves a FastAPI RAG API behind an ALB
+Minimal Claude-Code-like agent and Wikipedia RAG demo. It can run locally with
+a filesystem sandbox, or on AWS using Terraform + ECS Fargate:
+
+1. Ingest Wikipedia content into S3
+2. Index parsed content into Postgres (pgvector)
+3. Serve a FastAPI RAG/coding-agent API behind an ALB
 
 ---
 
-## 🧱 Architecture
+## Architecture
 
 ```
 ALB → ECS (FastAPI API)
@@ -27,6 +29,7 @@ ALB → ECS (FastAPI API)
 
 - Terraform >= 1.6
 - AWS CLI configured
+- Python >= 3.12 for local development
 - jq
 - psql (optional)
 
@@ -36,7 +39,7 @@ ALB → ECS (FastAPI API)
 
 Create:
 
-wiki-rag-bedrock/app
+claude-code-minimal/app
 
 ```json
 {
@@ -54,6 +57,9 @@ terraform init
 terraform apply
 ```
 
+Set the printed `github_actions_role_arn` output as the GitHub Actions
+`AWS_ROLE_TO_ASSUME` secret before enabling deployment workflows.
+
 ---
 
 ## 3) Push containers
@@ -65,8 +71,10 @@ ECS uses :latest, so you MUST deploy images:
 - deploy-indexer
 
 To push code to `main` without running deployment jobs, set
-`deploy: false` in `.github/deploy.yml`. Set it to `true` when the AWS
-infrastructure is ready for deployments.
+`deploy: false` in `.github/deploy.yml`. Deployment workflows may still start,
+but the shared deploy action skips AWS credentials, ECR login, and deploy
+scripts. Set `deploy: true` when the AWS infrastructure is ready for
+deployments.
 
 ---
 
@@ -114,6 +122,14 @@ Local provider options:
 not require Postgres/pgvector. Enable retrieval only after the database and
 embedding provider are available.
 
+With the local API running, try:
+
+```bash
+curl -sG 'http://127.0.0.1:8000/query' \
+  --data-urlencode 'q=Build a tiny Python hello module with unittest tests.' \
+  --data-urlencode 'use_retrieval=false'
+```
+
 Run component linting with:
 
 ```bash
@@ -130,9 +146,12 @@ Run API unit tests with coverage checking with:
 (cd api && make test)
 ```
 
+The API coverage floor is enforced at the current baseline in
+`api/pyproject.toml`; raise it when adding tests.
+
 ---
 
-## 🧹 Tear down
+## Tear Down
 
 ```bash
 terraform destroy
