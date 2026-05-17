@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shell-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Lint shell scripts
+        run: make lint
+
+  python-lint:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, ingest, indexer]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ${{ matrix.component }}/requirements-dev.txt
+
+      - name: Install lint dependencies
+        working-directory: ${{ matrix.component }}
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint ${{ matrix.component }}
+        working-directory: ${{ matrix.component }}
+        run: make lint
