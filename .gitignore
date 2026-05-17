@@ -4,4 +4,5 @@ terraform/terraform.tfstate*
 **/__pycache__
 **/*.egg-info
 **/.env.local
+**/.coverage
 responses/claude_code_minimal

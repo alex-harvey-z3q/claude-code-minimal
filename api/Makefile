@@ -1,4 +1,4 @@
-.PHONY: venv lint clean
+.PHONY: venv lint test clean
  
 venv:
 	python -m venv .venv
@@ -13,7 +13,11 @@ lint:
 	ruff check .
 	vulture src tests --min-confidence 80
 
+test:
+	coverage run -m unittest discover -s tests -p "test*.py"
+	coverage report
+
 clean:
 	find . -type f -name "*.pyc" -delete
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
-	rm -rf build dist *.egg-info .pytest_cache .mypy_cache .ruff_cache
+	rm -rf build dist *.egg-info .coverage .pytest_cache .mypy_cache .ruff_cache

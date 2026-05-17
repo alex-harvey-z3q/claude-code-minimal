@@ -69,4 +69,5 @@ jobs:
           DB_USER: user
           DB_PASSWORD: password
           EMBED_DIM: "1536"
-        run: python -m unittest discover -s api/tests -p "test*.py"
+        working-directory: api
+        run: make test

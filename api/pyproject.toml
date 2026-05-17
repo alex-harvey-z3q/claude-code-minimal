@@ -31,3 +31,11 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.coverage.run]
+source = ["src/api"]
+
+[tool.coverage.report]
+fail_under = 18
+show_missing = true
+skip_empty = true

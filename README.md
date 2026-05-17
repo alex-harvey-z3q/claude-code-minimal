@@ -124,6 +124,12 @@ Run component linting with:
 
 Each component lint runs Ruff plus Vulture dead-code detection.
 
+Run API unit tests with coverage checking with:
+
+```bash
+(cd api && make test)
+```
+
 ---
 
 ## 🧹 Tear down
