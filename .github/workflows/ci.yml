@@ -45,7 +45,7 @@ jobs:
         working-directory: ${{ matrix.component }}
         run: make lint
 
-  api-tests:
+  unit-tests:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -57,13 +57,13 @@ jobs:
           cache: pip
           cache-dependency-path: api/requirements-dev.txt
 
-      - name: Install API dependencies
+      - name: Install test dependencies
         working-directory: api
         run: |
           pip install -e .
           pip install -r requirements-dev.txt
 
-      - name: Run API unit tests
+      - name: Run unit tests
         env:
           DB_HOST: localhost
           DB_USER: user
