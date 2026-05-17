@@ -19,7 +19,7 @@ runs:
     - id: config
       shell: bash
       run: |
-        enabled="$(ruby -ryaml -e 'config = YAML.load_file(".github/deploy.yml"); puts config["deploy"])"
+        enabled="$(ruby -ryaml -e "config = YAML.load_file('.github/deploy.yml'); puts config['deploy']")"
         echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
         if [ "$enabled" != "true" ]; then
           echo "Deployments disabled by .github/deploy.yml"
