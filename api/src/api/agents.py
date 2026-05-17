@@ -10,7 +10,6 @@ from typing import Any, Callable
 
 from .config import MAX_WORKFLOW_ITERS, TEST_TIMEOUT_SECONDS, WORKSPACE_DIR
 from .llm import invoke_claude, invoke_claude_with_tools
-from .retrieval import retrieve
 from .sandbox import SandboxSession, truncate_tool_result
 
 MAX_ITERS = MAX_WORKFLOW_ITERS
@@ -697,7 +696,12 @@ def run_workflow(
     # Retrieval is optional so the same loop can be used both with and without
     # the RAG. That makes it easier to separate "retrieval quality" problems from
     # "agent loop" problems when debugging.
-    evidence = retrieve(question) if use_retrieval else []
+    if use_retrieval:
+        from .retrieval import retrieve
+
+        evidence = retrieve(question)
+    else:
+        evidence = []
 
     # Invoke the Planner and receive its response along with its prompts for
     # debugging.

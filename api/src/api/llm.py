@@ -3,15 +3,12 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any, Callable, Mapping
 
-import boto3
-from botocore.config import Config
-from botocore.exceptions import ReadTimeoutError
-
 from .config import (
     AWS_REGION,
     BEDROCK_CHAT_MODEL_ID,
     BEDROCK_CONNECT_TIMEOUT_SECONDS,
     BEDROCK_READ_TIMEOUT_SECONDS,
+    LLM_PROVIDER,
     MAX_TOKENS,
     TEMPERATURE,
 )
@@ -19,6 +16,9 @@ from .config import (
 
 @lru_cache(maxsize=1)
 def get_bedrock_client():
+    import boto3
+    from botocore.config import Config
+
     return boto3.client(
         "bedrock-runtime",
         region_name=AWS_REGION,
@@ -37,7 +37,14 @@ def invoke_claude(
     max_tokens: int = MAX_TOKENS,
     temperature: float = TEMPERATURE,
 ) -> str:
+    if LLM_PROVIDER == "fake":
+        return _invoke_fake(system_prompt, user_prompt)
+    if LLM_PROVIDER != "bedrock":
+        raise ValueError(f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}")
+
     try:
+        from botocore.exceptions import ReadTimeoutError
+
         response = get_bedrock_client().converse(
             modelId=BEDROCK_CHAT_MODEL_ID,
             system=[{"text": system_prompt}],
@@ -77,6 +84,11 @@ def invoke_claude_with_tools(
     for them with a read tool, which is the core difference from the previous
     "emit every changed file in the prompt" protocol.
     """
+    if LLM_PROVIDER == "fake":
+        return _invoke_fake_with_tools(system_prompt, user_prompt, tools=tools, handlers=handlers)
+    if LLM_PROVIDER != "bedrock":
+        raise ValueError(f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}")
+
     messages: list[dict[str, Any]] = [
         {
             "role": "user",
@@ -147,6 +159,56 @@ def invoke_claude_with_tools(
         messages.append({"role": "user", "content": result_content})
 
     raise RuntimeError(f"Claude did not finish after {max_tool_rounds} tool rounds.")
+
+
+def _invoke_fake(system_prompt: str, user_prompt: str) -> str:
+    del user_prompt
+    if "Planner" in system_prompt:
+        return (
+            "1. Files\n"
+            "- main.py\n"
+            "- test_main.py\n\n"
+            "2. Data structures / modules\n"
+            "- A minimal Python module\n\n"
+            "3. Conventions to follow\n"
+            "- Use unittest\n\n"
+            "4. Behaviour and flow\n"
+            "- Create a small testable implementation\n\n"
+            "5. Test strategy\n"
+            "- Run unittest discovery"
+        )
+    return "Fake provider response."
+
+
+def _invoke_fake_with_tools(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    tools: list[dict[str, Any]],
+    handlers: Mapping[str, Callable[..., str]],
+) -> tuple[str, dict[str, Any]]:
+    del system_prompt, user_prompt, tools
+    tool_calls = []
+
+    if "write_file" in handlers:
+        for path, content in {
+            "main.py": "def hello() -> str:\n    return 'hello from fake provider'\n",
+            "test_main.py": (
+                "import unittest\n\n"
+                "from main import hello\n\n\n"
+                "class HelloTest(unittest.TestCase):\n"
+                "    def test_hello(self):\n"
+                "        self.assertEqual(hello(), 'hello from fake provider')\n"
+            ),
+        }.items():
+            result = handlers["write_file"](path=path, content=content)
+            tool_calls.append({"name": "write_file", "input": {"path": path}, "status": "success", "result": result})
+
+        result = handlers["run_tests"]()
+        tool_calls.append({"name": "run_tests", "input": {}, "status": "success", "result": result})
+        return "Created a fake-provider smoke implementation and ran tests.", {"tool_calls": tool_calls}
+
+    return "PASS: Fake provider review.", {"tool_calls": tool_calls}
 
 
 def answer_with_evidence(

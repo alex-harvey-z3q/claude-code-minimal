@@ -88,6 +88,32 @@ curl "$alb/query?q=What%20is%20Kubernetes?"
 
 ---
 
+## Local agent development
+
+The API and sandbox can run locally on a MacBook, but real agent responses still
+need an LLM provider unless you use the smoke-test `fake` provider.
+
+```bash
+cd api
+make venv
+make install
+cd ..
+cp api/.env.example api/.env.local
+make dev-api
+```
+
+Local provider options:
+
+- `LLM_PROVIDER=fake` runs without Bedrock and creates a tiny smoke
+  implementation when the coding workflow is called.
+- `LLM_PROVIDER=bedrock` uses AWS credentials and the configured Bedrock model.
+
+`api/.env.example` sets `DEFAULT_USE_RETRIEVAL=false` so local workflow calls do
+not require Postgres/pgvector. Enable retrieval only after the database and
+embedding provider are available.
+
+---
+
 ## 🧹 Tear down
 
 ```bash

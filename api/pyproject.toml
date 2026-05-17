@@ -10,11 +10,9 @@ dependencies = [
   "psycopg[binary]>=3.1",
   "pgvector>=0.2",
   "llama-index-core>=0.10",
-  "llama-index-embeddings-openai>=0.1",
   "llama-index-embeddings-bedrock>=0.1",
   "llama-index-vector-stores-postgres>=0.1",
   "llama-index-llms-bedrock-converse>=0.1",
-  "openai>=1.0",
 ]
 
 [project.optional-dependencies]
