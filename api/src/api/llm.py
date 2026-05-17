@@ -14,6 +14,44 @@ from .config import (
 )
 
 
+class ToolLoopError(RuntimeError):
+    """Raised when a model keeps requesting tools without producing final text."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        model_id: str,
+        max_tool_rounds: int,
+        tool_calls: list[dict[str, Any]],
+        partial_text: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.model_id = model_id
+        self.max_tool_rounds = max_tool_rounds
+        self.tool_calls = tool_calls
+        self.partial_text = partial_text
+
+    def summary(self) -> dict[str, Any]:
+        counts: dict[str, int] = {}
+        for call in self.tool_calls:
+            name = str(call.get("name", "unknown"))
+            counts[name] = counts.get(name, 0) + 1
+
+        return {
+            "message": str(self),
+            "provider": self.provider,
+            "model_id": self.model_id,
+            "max_tool_rounds": self.max_tool_rounds,
+            "tool_call_count": len(self.tool_calls),
+            "tool_call_counts": counts,
+            "partial_text": self.partial_text,
+            "last_tool_calls": self.tool_calls[-10:],
+        }
+
+
 @lru_cache(maxsize=1)
 def get_bedrock_client():
     import boto3
@@ -162,7 +200,15 @@ def invoke_claude_with_tools(
 
         messages.append({"role": "user", "content": result_content})
 
-    raise RuntimeError(f"Claude did not finish after {max_tool_rounds} tool rounds.")
+    partial_text = "\n".join(part for part in final_text_parts if part).strip()
+    raise ToolLoopError(
+        f"Claude did not finish after {max_tool_rounds} tool rounds.",
+        provider=LLM_PROVIDER,
+        model_id=BEDROCK_CHAT_MODEL_ID,
+        max_tool_rounds=max_tool_rounds,
+        tool_calls=tool_calls,
+        partial_text=partial_text,
+    )
 
 
 def _invoke_fake(system_prompt: str, user_prompt: str) -> str:

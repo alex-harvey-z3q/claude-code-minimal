@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -241,6 +242,15 @@ class SandboxSession:
             handlers["delete_file"] = self.delete_file
 
         return tool_specs, handlers
+
+    def trace_path(self) -> Path:
+        return self.root / "agent_trace.json"
+
+    def write_trace(self, trace: dict[str, Any]) -> None:
+        self.trace_path().write_text(
+            json.dumps(trace, indent=2, sort_keys=True, default=str),
+            encoding="utf-8",
+        )
 
 
 def _decode_output(output: str | bytes | None) -> str:

@@ -41,6 +41,16 @@ class SandboxSessionTest(unittest.TestCase):
             self.assertTrue(passed)
             self.assertIn("Ran 1 test", output)
 
+    def test_write_trace_writes_json_trace_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sandbox = SandboxSession(Path(tmpdir), run_id="run")
+
+            sandbox.write_trace({"stop_reason": "debug", "tool_calls": [{"name": "run_tests"}]})
+
+            trace = sandbox.trace_path().read_text(encoding="utf-8")
+            self.assertIn('"stop_reason": "debug"', trace)
+            self.assertIn('"name": "run_tests"', trace)
+
 
 if __name__ == "__main__":
     unittest.main()

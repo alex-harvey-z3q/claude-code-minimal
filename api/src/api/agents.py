@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import MAX_WORKFLOW_ITERS, TEST_TIMEOUT_SECONDS, WORKSPACE_DIR
-from .llm import invoke_claude, invoke_claude_with_tools
+from .llm import ToolLoopError, invoke_claude, invoke_claude_with_tools
 from .sandbox import SandboxSession, truncate_tool_result
 
 MAX_ITERS = MAX_WORKFLOW_ITERS
@@ -488,6 +488,49 @@ def _format_tool_trace(tool_trace: dict[str, Any]) -> str:
     return "\n\n".join(lines)
 
 
+class WorkflowExecutionError(RuntimeError):
+    """Workflow failure with workspace trace context."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        workspace_id: str,
+        trace_file: str,
+        debug: dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.workspace_id = workspace_id
+        self.trace_file = trace_file
+        self.debug = debug
+
+
+def _build_workflow_trace(
+    *,
+    question: str,
+    use_retrieval: bool,
+    sandbox: SandboxSession,
+    evidence: list[dict] | None = None,
+    plan: str | None = None,
+    plan_trace: dict[str, str] | None = None,
+    iterations: list[dict[str, object]] | None = None,
+    stop_reason: str | None = None,
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "question": question,
+        "use_retrieval": use_retrieval,
+        "workspace_id": sandbox.run_id,
+        "workspace_root": str(sandbox.root),
+        "evidence_count": len(evidence or []),
+        "plan": plan,
+        "plan_trace": plan_trace,
+        "iterations": iterations or [],
+        "stop_reason": stop_reason,
+        "error": error,
+    }
+
+
 def plan_task(question: str, evidence: list[dict]) -> tuple[str, dict[str, str]]:
     """Ask the planner model for a compact implementation plan.
 
@@ -693,24 +736,63 @@ def run_workflow(
 ) -> dict[str, object]:
     """Execute the full iterative coding workflow."""
 
+    # The sandbox is the loop's external memory. Each workflow gets a fresh
+    # workspace so concurrent requests cannot trample each other's files. It is
+    # created before planning so even planning/tool-loop failures have a trace
+    # file and workspace id.
+    sandbox = SandboxSession(Path(WORKSPACE_DIR))
+    sandbox.reset()
+
+    evidence: list[dict] = []
+    plan: str | None = None
+    plan_trace: dict[str, str] | None = None
+    iterations: list[dict[str, object]] = []
+    stop_reason = "max_iterations_reached"
+
     # Retrieval is optional so the same loop can be used both with and without
     # the RAG. That makes it easier to separate "retrieval quality" problems from
     # "agent loop" problems when debugging.
-    if use_retrieval:
-        from .retrieval import retrieve
+    try:
+        if use_retrieval:
+            from .retrieval import retrieve
 
-        evidence = retrieve(question)
-    else:
-        evidence = []
+            evidence = retrieve(question)
 
-    # Invoke the Planner and receive its response along with its prompts for
-    # debugging.
-    plan, plan_trace = plan_task(question, evidence)
-
-    # The sandbox is the loop's external memory. Each workflow gets a fresh
-    # workspace so concurrent requests cannot trample each other's files.
-    sandbox = SandboxSession(Path(WORKSPACE_DIR))
-    sandbox.reset()
+        # Invoke the Planner and receive its response along with its prompts for
+        # debugging.
+        plan, plan_trace = plan_task(question, evidence)
+        sandbox.write_trace(
+            _build_workflow_trace(
+                question=question,
+                use_retrieval=use_retrieval,
+                sandbox=sandbox,
+                evidence=evidence,
+                plan=plan,
+                plan_trace=plan_trace,
+                iterations=iterations,
+                stop_reason="planning_complete",
+            )
+        )
+    except Exception as exc:
+        error = _workflow_error_payload(exc)
+        trace = _build_workflow_trace(
+            question=question,
+            use_retrieval=use_retrieval,
+            sandbox=sandbox,
+            evidence=evidence,
+            plan=plan,
+            plan_trace=plan_trace,
+            iterations=iterations,
+            stop_reason="planning_failed",
+            error=error,
+        )
+        sandbox.write_trace(trace)
+        raise WorkflowExecutionError(
+            str(exc),
+            workspace_id=sandbox.run_id,
+            trace_file=str(sandbox.trace_path()),
+            debug=error,
+        ) from exc
 
     # These variables track the latest state of the loop. The final response
     # returns the last successful-or-not attempt plus the full per-iteration log.
@@ -719,9 +801,6 @@ def run_workflow(
 
     issue_summary: str | None = None
     retry_files: list[str] = []
-    iterations: list[dict[str, object]] = []
-
-    stop_reason = "max_iterations_reached"
 
     for iteration in range(1, MAX_ITERS + 1):
         # Iteration 1 is a full generation from the task + evidence + plan.
@@ -731,14 +810,35 @@ def run_workflow(
 
         # Invoke the Implementer and receive its code along with its prompts
         # for debugging.
-        code, implement_trace = implement_task(
-            question,
-            evidence,
-            plan,
-            sandbox,
-            issue_summary=issue_summary,
-            retry_mode=retry_mode,
-        )
+        try:
+            code, implement_trace = implement_task(
+                question,
+                evidence,
+                plan,
+                sandbox,
+                issue_summary=issue_summary,
+                retry_mode=retry_mode,
+            )
+        except Exception as exc:
+            error = _workflow_error_payload(exc)
+            trace = _build_workflow_trace(
+                question=question,
+                use_retrieval=use_retrieval,
+                sandbox=sandbox,
+                evidence=evidence,
+                plan=plan,
+                plan_trace=plan_trace,
+                iterations=iterations,
+                stop_reason="implement_failed",
+                error=error,
+            )
+            sandbox.write_trace(trace)
+            raise WorkflowExecutionError(
+                str(exc),
+                workspace_id=sandbox.run_id,
+                trace_file=str(sandbox.trace_path()),
+                debug=error,
+            ) from exc
 
         workspace_snapshot = ""
         blocking_checklist: list[str] = []
@@ -762,13 +862,34 @@ def run_workflow(
             # source of truth. Its role is to catch issues that tests missed,
             # while being constrained by explicit runtime facts from the test
             # runner.
-            review, review_trace = review_code(
-                question,
-                evidence,
-                sandbox,
-                test_output=test_output,
-                tests_passed=tests_passed,
-            )
+            try:
+                review, review_trace = review_code(
+                    question,
+                    evidence,
+                    sandbox,
+                    test_output=test_output,
+                    tests_passed=tests_passed,
+                )
+            except Exception as exc:
+                error = _workflow_error_payload(exc)
+                trace = _build_workflow_trace(
+                    question=question,
+                    use_retrieval=use_retrieval,
+                    sandbox=sandbox,
+                    evidence=evidence,
+                    plan=plan,
+                    plan_trace=plan_trace,
+                    iterations=iterations,
+                    stop_reason="review_failed",
+                    error=error,
+                )
+                sandbox.write_trace(trace)
+                raise WorkflowExecutionError(
+                    str(exc),
+                    workspace_id=sandbox.run_id,
+                    trace_file=str(sandbox.trace_path()),
+                    debug=error,
+                ) from exc
 
             # Turn test failures and blocking review items into a compact
             # checklist that can be fed into the next retry prompt.
@@ -815,6 +936,18 @@ def run_workflow(
         }
 
         iterations.append(iteration_record)
+        sandbox.write_trace(
+            _build_workflow_trace(
+                question=question,
+                use_retrieval=use_retrieval,
+                sandbox=sandbox,
+                evidence=evidence,
+                plan=plan,
+                plan_trace=plan_trace,
+                iterations=iterations,
+                stop_reason=stop_reason,
+            )
+        )
 
         # Convergence means both judges agree: the tests are green and the
         # reviewer has no grounded blocking objections.
@@ -854,4 +987,27 @@ def run_workflow(
         },
     }
 
+    sandbox.write_trace(
+        _build_workflow_trace(
+            question=question,
+            use_retrieval=use_retrieval,
+            sandbox=sandbox,
+            evidence=evidence,
+            plan=plan,
+            plan_trace=plan_trace,
+            iterations=iterations,
+            stop_reason=stop_reason,
+        )
+    )
+
     return response
+
+
+def _workflow_error_payload(exc: Exception) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": exc.__class__.__name__,
+        "message": str(exc),
+    }
+    if isinstance(exc, ToolLoopError):
+        payload["tool_loop"] = exc.summary()
+    return payload
