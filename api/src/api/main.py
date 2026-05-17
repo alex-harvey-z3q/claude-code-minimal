@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 
 from .config import DEFAULT_USE_RETRIEVAL
 from .agents import run_workflow
@@ -17,4 +17,7 @@ def query(
     q: str = Query(..., min_length=1, max_length=2000),
     use_retrieval: bool = Query(DEFAULT_USE_RETRIEVAL),
 ):
-    return run_workflow(q, use_retrieval=use_retrieval)
+    try:
+        return run_workflow(q, use_retrieval=use_retrieval)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

@@ -43,8 +43,6 @@ def invoke_claude(
         raise ValueError(f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}")
 
     try:
-        from botocore.exceptions import ReadTimeoutError
-
         response = get_bedrock_client().converse(
             modelId=BEDROCK_CHAT_MODEL_ID,
             system=[{"text": system_prompt}],
@@ -59,8 +57,14 @@ def invoke_claude(
                 "temperature": temperature,
             },
         )
-    except ReadTimeoutError as exc:
-        raise RuntimeError("Bedrock request timed out before the model returned a response.") from exc
+    except Exception as exc:
+        if exc.__class__.__name__ == "ReadTimeoutError":
+            raise RuntimeError("Bedrock request timed out before the model returned a response.") from exc
+        if exc.__class__.__name__ == "NoCredentialsError":
+            raise RuntimeError(
+                "AWS credentials were not found. Configure local AWS credentials before using LLM_PROVIDER=bedrock."
+            ) from exc
+        raise
 
     content = response["output"]["message"]["content"]
     text_parts = [part.get("text", "") for part in content if "text" in part]
