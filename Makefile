@@ -1,4 +1,4 @@
-.PHONY: lint dev-api
+.PHONY: lint dev-api index
 
 lint:
 	shellcheck scripts/*.sh
