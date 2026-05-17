@@ -4,7 +4,7 @@ locals {
   db_username             = "wikirdb"
   github_repo             = "alex-harvey-z3q/claude-code-minimal"
   laptop_ip               = "125.63.140.154/32"
-  bedrock_chat_model_id   = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+  bedrock_chat_model_id   = "au.anthropic.claude-sonnet-4-6"
   bedrock_embed_model_id  = "amazon.titan-embed-text-v2:0"
   embed_dim               = "1024"
 }

@@ -7,7 +7,7 @@ AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-2")
 
 BEDROCK_CHAT_MODEL_ID = os.getenv(
     "BEDROCK_CHAT_MODEL_ID",
-    "apac.anthropic.claude-sonnet-4-20250514-v1:0",
+    "au.anthropic.claude-sonnet-4-6",
 )
 BEDROCK_EMBED_MODEL_ID = os.getenv("BEDROCK_EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
 

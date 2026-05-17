@@ -107,7 +107,7 @@ Local provider options:
 - `LLM_PROVIDER=fake` runs without Bedrock and creates a tiny smoke
   implementation when the coding workflow is called.
 - `LLM_PROVIDER=bedrock` uses AWS credentials and the configured Bedrock model.
-  The local example uses the APAC Claude Sonnet 4 inference profile for
+  The local example uses the AU Claude Sonnet 4.6 inference profile for
   `ap-southeast-2`.
 
 `api/.env.example` sets `DEFAULT_USE_RETRIEVAL=false` so local workflow calls do
