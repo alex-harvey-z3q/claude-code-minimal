@@ -19,11 +19,9 @@ runs:
     - id: config
       shell: bash
       run: |
-        value="$(sed -nE 's/^[[:space:]]*deploy[[:space:]]*:[[:space:]]*(.+)[[:space:]]*$/\1/p' .github/deploy.yml | head -n 1 | tr '[:upper:]' '[:lower:]')"
-        if [ "$value" = "true" ] || [ "$value" = "yes" ] || [ "$value" = "1" ]; then
-          echo "enabled=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "enabled=false" >> "$GITHUB_OUTPUT"
+        enabled="$(ruby -ryaml -e 'config = YAML.load_file(".github/deploy.yml"); puts config["deploy"])"
+        echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+        if [ "$enabled" != "true" ]; then
           echo "Deployments disabled by .github/deploy.yml"
         fi
 
