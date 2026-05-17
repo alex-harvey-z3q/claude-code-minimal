@@ -222,13 +222,22 @@ class SandboxSession:
                     {
                         "toolSpec": {
                             "name": "write_file",
-                            "description": "Create or replace a UTF-8 text file in the sandbox workspace.",
+                            "description": (
+                                "Create or replace a UTF-8 text file in the sandbox workspace. "
+                                "The input must include both path and content in the same call."
+                            ),
                             "inputSchema": {
                                 "json": {
                                     "type": "object",
                                     "properties": {
-                                        "path": {"type": "string"},
-                                        "content": {"type": "string"},
+                                        "path": {
+                                            "type": "string",
+                                            "description": "Relative path of the file to create or replace.",
+                                        },
+                                        "content": {
+                                            "type": "string",
+                                            "description": "Complete UTF-8 file contents to write at path.",
+                                        },
                                     },
                                     "required": ["path", "content"],
                                 }

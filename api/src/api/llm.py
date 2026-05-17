@@ -13,6 +13,8 @@ from .config import (
     TEMPERATURE,
 )
 
+MALFORMED_TOOL_CALL_LIMIT = 3
+
 
 class ToolLoopError(RuntimeError):
     """Raised when a model keeps requesting tools without producing final text."""
@@ -109,6 +111,37 @@ def invoke_claude(
     return "\n".join(part for part in text_parts if part).strip()
 
 
+def _tool_required_fields(tools: list[dict[str, Any]]) -> dict[str, set[str]]:
+    required: dict[str, set[str]] = {}
+    for tool in tools:
+        spec = tool.get("toolSpec") or {}
+        name = spec.get("name")
+        schema = ((spec.get("inputSchema") or {}).get("json") or {})
+        if isinstance(name, str):
+            required[name] = set(schema.get("required") or [])
+    return required
+
+
+def _validate_tool_input(
+    name: str,
+    arguments: Any,
+    required_fields: Mapping[str, set[str]],
+) -> str | None:
+    if not isinstance(arguments, dict):
+        return f"Tool call rejected: {name} input must be a JSON object."
+
+    missing = sorted(field for field in required_fields.get(name, set()) if field not in arguments)
+    if not missing:
+        return None
+
+    required_list = ", ".join(sorted(required_fields.get(name, set())))
+    missing_list = ", ".join(missing)
+    return (
+        f"Tool call rejected: {name} requires input fields: {required_list}. "
+        f"Missing: {missing_list}. Retry with JSON input containing every required field."
+    )
+
+
 def invoke_claude_with_tools(
     system_prompt: str,
     user_prompt: str,
@@ -139,6 +172,8 @@ def invoke_claude_with_tools(
     ]
     tool_calls: list[dict[str, Any]] = []
     final_text_parts: list[str] = []
+    required_fields = _tool_required_fields(tools)
+    malformed_counts: dict[tuple[str, tuple[str, ...]], int] = {}
 
     for _ in range(max_tool_rounds):
         response = get_bedrock_client().converse(
@@ -171,23 +206,48 @@ def invoke_claude_with_tools(
             tool_use_id = tool_use["toolUseId"]
             arguments = tool_use.get("input") or {}
 
-            try:
-                if name not in handlers:
-                    raise ValueError(f"Unknown tool: {name}")
-                result_text = handlers[name](**arguments)
-                status = "success"
-            except Exception as exc:
-                result_text = str(exc)
+            validation_error = _validate_tool_input(name, arguments, required_fields)
+            if validation_error:
+                result_text = validation_error
                 status = "error"
+            else:
+                try:
+                    if name not in handlers:
+                        raise ValueError(f"Unknown tool: {name}")
+                    result_text = handlers[name](**arguments)
+                    status = "success"
+                except Exception as exc:
+                    result_text = str(exc)
+                    status = "error"
 
-            tool_calls.append(
-                {
-                    "name": name,
-                    "input": arguments,
-                    "status": status,
-                    "result": result_text,
-                }
-            )
+            call_record = {
+                "name": name,
+                "input": arguments,
+                "status": status,
+                "result": result_text,
+            }
+            tool_calls.append(call_record)
+
+            if validation_error:
+                missing_key = (
+                    name,
+                    tuple(sorted(field for field in required_fields.get(name, set()) if field not in arguments)),
+                )
+                malformed_counts[missing_key] = malformed_counts.get(missing_key, 0) + 1
+                if malformed_counts[missing_key] >= MALFORMED_TOOL_CALL_LIMIT:
+                    partial_text = "\n".join(part for part in final_text_parts if part).strip()
+                    raise ToolLoopError(
+                        (
+                            f"Claude repeated malformed {name} tool calls "
+                            f"{MALFORMED_TOOL_CALL_LIMIT} times: {result_text}"
+                        ),
+                        provider=LLM_PROVIDER,
+                        model_id=BEDROCK_CHAT_MODEL_ID,
+                        max_tool_rounds=max_tool_rounds,
+                        tool_calls=tool_calls,
+                        partial_text=partial_text,
+                    )
+
             result_content.append(
                 {
                     "toolResult": {

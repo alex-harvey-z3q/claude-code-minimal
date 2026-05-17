@@ -465,6 +465,8 @@ def implement_task(
         "- place tests either as top-level files named test_*.py or under tests/\n"
         "- tests must be discoverable by python -m unittest discover\n"
         "- use write_file/delete_file to change files\n"
+        "- every write_file call must include both path and content in the same tool input\n"
+        "- never call write_file with only a path; content must contain the complete file text\n"
         "- use run_tests before finishing\n"
         "- do not include source file bodies in your final text\n\n"
         "Retrieved evidence handling:\n"

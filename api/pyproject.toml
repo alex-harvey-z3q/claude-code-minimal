@@ -36,6 +36,6 @@ where = ["src"]
 source = ["src/api"]
 
 [tool.coverage.report]
-fail_under = 77
+fail_under = 78
 show_missing = true
 skip_empty = true

@@ -148,6 +148,65 @@ class LlmTest(unittest.TestCase):
         self.assertEqual(trace["tool_calls"][0]["status"], "error")
         self.assertIn("Unknown tool", trace["tool_calls"][0]["result"])
 
+    def test_bedrock_tool_loop_rejects_repeated_malformed_tool_calls(self) -> None:
+        class MalformedClient:
+            def converse(self, **kwargs):
+                del kwargs
+                return {
+                    "output": {
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {"text": "trying"},
+                                {
+                                    "toolUse": {
+                                        "name": "write_file",
+                                        "toolUseId": "tool-1",
+                                        "input": {"path": "tests/test_minesweeper.py"},
+                                    }
+                                },
+                            ],
+                        }
+                    }
+                }
+
+        tools = [
+            {
+                "toolSpec": {
+                    "name": "write_file",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"},
+                            },
+                            "required": ["path", "content"],
+                        }
+                    },
+                }
+            }
+        ]
+
+        with (
+            patch.object(llm, "LLM_PROVIDER", "bedrock"),
+            patch.object(llm, "BEDROCK_CHAT_MODEL_ID", "model"),
+            patch.object(llm, "MALFORMED_TOOL_CALL_LIMIT", 2),
+            patch.object(llm, "get_bedrock_client", return_value=MalformedClient()),
+        ):
+            with self.assertRaises(llm.ToolLoopError) as raised:
+                llm.invoke_claude_with_tools(
+                    "system",
+                    "user",
+                    tools=tools,
+                    handlers={"write_file": lambda path, content: f"{path}:{content}"},
+                    max_tool_rounds=5,
+                )
+
+        self.assertIn("repeated malformed write_file tool calls", str(raised.exception))
+        self.assertEqual(len(raised.exception.tool_calls), 2)
+        self.assertIn("Missing: content", raised.exception.tool_calls[-1]["result"])
+
     def test_bedrock_tool_loop_raises_after_max_rounds(self) -> None:
         class LoopingClient:
             def converse(self, **kwargs):
