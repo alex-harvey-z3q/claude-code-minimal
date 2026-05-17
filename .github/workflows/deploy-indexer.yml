@@ -18,14 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ap-southeast-2
-
-      - name: Login to ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
       - name: Deploy indexer
-        run: bash ./scripts/deploy_indexer.sh
+        uses: ./.github/actions/deploy-service
+        with:
+          script: ./scripts/deploy_indexer.sh
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}

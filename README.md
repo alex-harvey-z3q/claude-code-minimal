@@ -64,6 +64,10 @@ ECS uses :latest, so you MUST deploy images:
 - deploy-ingest
 - deploy-indexer
 
+To push code to `main` without running deployment jobs, set
+`deploy: false` in `.github/deploy.yml`. Set it to `true` when the AWS
+infrastructure is ready for deployments.
+
 ---
 
 ## 4) Bootstrap data

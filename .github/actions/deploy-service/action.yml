@@ -1,0 +1,44 @@
+name: Deploy service
+description: Deploy a service only when .github/deploy.yml enables deployments.
+
+inputs:
+  script:
+    description: Deployment script to execute.
+    required: true
+  aws-role-to-assume:
+    description: AWS role ARN to assume with GitHub OIDC.
+    required: true
+  aws-region:
+    description: AWS region for deployment.
+    required: false
+    default: ap-southeast-2
+
+runs:
+  using: composite
+  steps:
+    - id: config
+      shell: bash
+      run: |
+        value="$(sed -nE 's/^[[:space:]]*deploy[[:space:]]*:[[:space:]]*(.+)[[:space:]]*$/\1/p' .github/deploy.yml | head -n 1 | tr '[:upper:]' '[:lower:]')"
+        if [ "$value" = "true" ] || [ "$value" = "yes" ] || [ "$value" = "1" ]; then
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          echo "Deployments disabled by .github/deploy.yml"
+        fi
+
+    - name: Configure AWS credentials (OIDC)
+      if: ${{ steps.config.outputs.enabled == 'true' }}
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-to-assume }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Login to ECR
+      if: ${{ steps.config.outputs.enabled == 'true' }}
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Deploy
+      if: ${{ steps.config.outputs.enabled == 'true' }}
+      shell: bash
+      run: bash "${{ inputs.script }}"
