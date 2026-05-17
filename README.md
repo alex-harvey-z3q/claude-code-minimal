@@ -114,6 +114,16 @@ Local provider options:
 not require Postgres/pgvector. Enable retrieval only after the database and
 embedding provider are available.
 
+Run component linting with:
+
+```bash
+(cd api && make lint)
+(cd ingest && make lint)
+(cd indexer && make lint)
+```
+
+Each component lint runs Ruff plus Vulture dead-code detection.
+
 ---
 
 ## 🧹 Tear down

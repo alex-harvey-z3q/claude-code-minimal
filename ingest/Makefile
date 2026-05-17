@@ -11,6 +11,7 @@ install:
 
 lint:
 	ruff check .
+	vulture src --min-confidence 80
 
 clean:
 	find . -type f -name "*.pyc" -delete
