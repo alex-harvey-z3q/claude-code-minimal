@@ -14,6 +14,7 @@ from .config import (
 )
 
 MALFORMED_TOOL_CALL_LIMIT = 3
+TRACE_PREVIEW_CHARS = 1000
 
 
 class ToolLoopError(RuntimeError):
@@ -28,6 +29,7 @@ class ToolLoopError(RuntimeError):
         max_tool_rounds: int,
         tool_calls: list[dict[str, Any]],
         partial_text: str = "",
+        rounds: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
@@ -35,6 +37,7 @@ class ToolLoopError(RuntimeError):
         self.max_tool_rounds = max_tool_rounds
         self.tool_calls = tool_calls
         self.partial_text = partial_text
+        self.rounds = rounds or []
 
     def summary(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
@@ -47,10 +50,14 @@ class ToolLoopError(RuntimeError):
             "provider": self.provider,
             "model_id": self.model_id,
             "max_tool_rounds": self.max_tool_rounds,
+            "round_count": len(self.rounds),
             "tool_call_count": len(self.tool_calls),
             "tool_call_counts": counts,
+            "error_count": sum(1 for call in self.tool_calls if call.get("status") == "error"),
+            "run_tests_count": sum(1 for call in self.tool_calls if call.get("name") == "run_tests"),
             "partial_text": self.partial_text,
             "last_tool_calls": self.tool_calls[-10:],
+            "last_rounds": self.rounds[-3:],
         }
 
 
@@ -142,6 +149,55 @@ def _validate_tool_input(
     )
 
 
+def _preview_text(text: str, *, limit: int = TRACE_PREVIEW_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]..."
+
+
+def _sanitize_tool_input(arguments: Any) -> Any:
+    if not isinstance(arguments, dict):
+        return arguments
+
+    sanitized = dict(arguments)
+    if "content" in sanitized:
+        content = str(sanitized["content"])
+        sanitized["content"] = f"<redacted {len(content)} characters>"
+    return sanitized
+
+
+def _count_by_key(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key, "unknown"))
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _tool_trace_summary(
+    *,
+    provider: str,
+    model_id: str,
+    max_tool_rounds: int,
+    round_count: int,
+    tool_calls: list[dict[str, Any]],
+    final_text: str = "",
+) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "model_id": model_id,
+        "max_tool_rounds": max_tool_rounds,
+        "round_count": round_count,
+        "tool_call_count": len(tool_calls),
+        "tool_call_counts": _count_by_key(tool_calls, "name"),
+        "tool_status_counts": _count_by_key(tool_calls, "status"),
+        "run_tests_count": sum(1 for call in tool_calls if call.get("name") == "run_tests"),
+        "error_count": sum(1 for call in tool_calls if call.get("status") == "error"),
+        "malformed_tool_call_count": sum(1 for call in tool_calls if call.get("validation_error")),
+        "final_text_preview": _preview_text(final_text),
+    }
+
+
 def invoke_claude_with_tools(
     system_prompt: str,
     user_prompt: str,
@@ -171,11 +227,12 @@ def invoke_claude_with_tools(
         }
     ]
     tool_calls: list[dict[str, Any]] = []
+    rounds: list[dict[str, Any]] = []
     final_text_parts: list[str] = []
     required_fields = _tool_required_fields(tools)
     malformed_counts: dict[tuple[str, tuple[str, ...]], int] = {}
 
-    for _ in range(max_tool_rounds):
+    for round_number in range(1, max_tool_rounds + 1):
         response = get_bedrock_client().converse(
             modelId=BEDROCK_CHAT_MODEL_ID,
             system=[{"text": system_prompt}],
@@ -192,11 +249,35 @@ def invoke_claude_with_tools(
 
         content = output_message.get("content", [])
         tool_uses = [part["toolUse"] for part in content if "toolUse" in part]
-        final_text_parts.extend(part.get("text", "") for part in content if "text" in part)
+        text_parts = [part.get("text", "") for part in content if "text" in part]
+        final_text_parts.extend(text_parts)
+        round_record: dict[str, Any] = {
+            "round": round_number,
+            "assistant_text": _preview_text("\n".join(part for part in text_parts if part)),
+            "tool_requests": [
+                {
+                    "tool_use_id": tool_use.get("toolUseId"),
+                    "name": tool_use.get("name"),
+                    "input": _sanitize_tool_input(tool_use.get("input") or {}),
+                }
+                for tool_use in tool_uses
+            ],
+            "tool_results": [],
+        }
+        rounds.append(round_record)
 
         if not tool_uses:
-            return "\n".join(part for part in final_text_parts if part).strip(), {
-                "messages": messages,
+            final_text = "\n".join(part for part in final_text_parts if part).strip()
+            return final_text, {
+                "summary": _tool_trace_summary(
+                    provider=LLM_PROVIDER,
+                    model_id=BEDROCK_CHAT_MODEL_ID,
+                    max_tool_rounds=max_tool_rounds,
+                    round_count=round_number,
+                    tool_calls=tool_calls,
+                    final_text=final_text,
+                ),
+                "rounds": rounds,
                 "tool_calls": tool_calls,
             }
 
@@ -221,12 +302,17 @@ def invoke_claude_with_tools(
                     status = "error"
 
             call_record = {
+                "round": round_number,
+                "tool_use_id": tool_use_id,
                 "name": name,
-                "input": arguments,
+                "input": _sanitize_tool_input(arguments),
                 "status": status,
-                "result": result_text,
+                "result": _preview_text(result_text),
             }
+            if validation_error:
+                call_record["validation_error"] = True
             tool_calls.append(call_record)
+            round_record["tool_results"].append(call_record)
 
             if validation_error:
                 missing_key = (
@@ -246,6 +332,7 @@ def invoke_claude_with_tools(
                         max_tool_rounds=max_tool_rounds,
                         tool_calls=tool_calls,
                         partial_text=partial_text,
+                        rounds=rounds,
                     )
 
             result_content.append(
@@ -268,6 +355,7 @@ def invoke_claude_with_tools(
         max_tool_rounds=max_tool_rounds,
         tool_calls=tool_calls,
         partial_text=partial_text,
+        rounds=rounds,
     )
 
 
@@ -298,9 +386,17 @@ def _invoke_fake_with_tools(
     handlers: Mapping[str, Callable[..., str]],
 ) -> tuple[str, dict[str, Any]]:
     del system_prompt, user_prompt, tools
-    tool_calls = []
+    tool_calls: list[dict[str, Any]] = []
+    rounds: list[dict[str, Any]] = []
 
     if "write_file" in handlers:
+        round_record: dict[str, Any] = {
+            "round": 1,
+            "assistant_text": "",
+            "tool_requests": [],
+            "tool_results": [],
+        }
+        rounds.append(round_record)
         for path, content in {
             "main.py": "def hello() -> str:\n    return 'hello from fake provider'\n",
             "test_main.py": (
@@ -312,13 +408,55 @@ def _invoke_fake_with_tools(
             ),
         }.items():
             result = handlers["write_file"](path=path, content=content)
-            tool_calls.append({"name": "write_file", "input": {"path": path}, "status": "success", "result": result})
+            call_record = {
+                "round": 1,
+                "tool_use_id": f"fake-{len(tool_calls) + 1}",
+                "name": "write_file",
+                "input": {"path": path},
+                "status": "success",
+                "result": result,
+            }
+            tool_calls.append(call_record)
+            round_record["tool_results"].append(call_record)
 
         result = handlers["run_tests"]()
-        tool_calls.append({"name": "run_tests", "input": {}, "status": "success", "result": result})
-        return "Created a fake-provider smoke implementation and ran tests.", {"tool_calls": tool_calls}
+        call_record = {
+            "round": 1,
+            "tool_use_id": f"fake-{len(tool_calls) + 1}",
+            "name": "run_tests",
+            "input": {},
+            "status": "success",
+            "result": result,
+        }
+        tool_calls.append(call_record)
+        round_record["tool_results"].append(call_record)
+        final_text = "Created a fake-provider smoke implementation and ran tests."
+        return final_text, {
+            "summary": _tool_trace_summary(
+                provider=LLM_PROVIDER,
+                model_id=BEDROCK_CHAT_MODEL_ID,
+                max_tool_rounds=1,
+                round_count=1,
+                tool_calls=tool_calls,
+                final_text=final_text,
+            ),
+            "rounds": rounds,
+            "tool_calls": tool_calls,
+        }
 
-    return "PASS: Fake provider review.", {"tool_calls": tool_calls}
+    final_text = "PASS: Fake provider review."
+    return final_text, {
+        "summary": _tool_trace_summary(
+            provider=LLM_PROVIDER,
+            model_id=BEDROCK_CHAT_MODEL_ID,
+            max_tool_rounds=1,
+            round_count=0,
+            tool_calls=tool_calls,
+            final_text=final_text,
+        ),
+        "rounds": rounds,
+        "tool_calls": tool_calls,
+    }
 
 
 def answer_with_evidence(

@@ -327,6 +327,59 @@ def _format_tool_trace(tool_trace: dict[str, Any]) -> str:
     return "\n\n".join(lines)
 
 
+def _build_tool_observability(
+    iterations: list[dict[str, object]] | None,
+    *,
+    stop_reason: str | None,
+    error: dict[str, Any] | None,
+) -> dict[str, Any]:
+    phases: list[dict[str, Any]] = []
+    totals: dict[str, int] = {}
+
+    for iteration in iterations or []:
+        trace = iteration.get("trace")
+        if not isinstance(trace, dict):
+            continue
+
+        for phase_name in ("implement", "review"):
+            phase_trace = trace.get(phase_name)
+            if not isinstance(phase_trace, dict):
+                continue
+            summary = phase_trace.get("tool_loop")
+            if not isinstance(summary, dict):
+                continue
+
+            tool_counts = summary.get("tool_call_counts")
+            if isinstance(tool_counts, dict):
+                for tool_name, count in tool_counts.items():
+                    totals[str(tool_name)] = totals.get(str(tool_name), 0) + int(count)
+
+            phases.append(
+                {
+                    "iteration": iteration.get("iteration"),
+                    "retry_mode": iteration.get("retry_mode"),
+                    "phase": phase_name,
+                    "round_count": summary.get("round_count", 0),
+                    "tool_call_count": summary.get("tool_call_count", 0),
+                    "tool_call_counts": tool_counts or {},
+                    "run_tests_count": summary.get("run_tests_count", 0),
+                    "error_count": summary.get("error_count", 0),
+                    "malformed_tool_call_count": summary.get("malformed_tool_call_count", 0),
+                    "final_text_preview": summary.get("final_text_preview", ""),
+                }
+            )
+
+    return {
+        "outer_iteration_count": len(iterations or []),
+        "stop_reason": stop_reason,
+        "completed": stop_reason == "tests_passed_and_review_clean",
+        "total_tool_call_count": sum(totals.values()),
+        "tool_call_counts": totals,
+        "phases": phases,
+        "error": error,
+    }
+
+
 class WorkflowExecutionError(RuntimeError):
     """Workflow failure with workspace trace context."""
 
@@ -365,6 +418,7 @@ def _build_workflow_trace(
         "plan": plan,
         "plan_trace": plan_trace,
         "iterations": iterations or [],
+        "observability": _build_tool_observability(iterations, stop_reason=stop_reason, error=error),
         "stop_reason": stop_reason,
         "error": error,
     }
@@ -419,7 +473,7 @@ def implement_task(
     *,
     issue_summary: str | None = None,
     retry_mode: bool = False,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, Any]]:
     """Ask the implementer model to edit the sandbox through host tools.
 
     The model no longer returns file bodies as its primary output. It mutates
@@ -490,6 +544,8 @@ def implement_task(
         "user_prompt": user_prompt,
         "response": response,
         "tool_calls": _format_tool_trace(tool_trace),
+        "tool_loop": tool_trace.get("summary", {}),
+        "tool_rounds": tool_trace.get("rounds", []),
     }
 
 
@@ -500,7 +556,7 @@ def review_code(
     *,
     test_output: str = "",
     tests_passed: bool = False,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, Any]]:
     """Ask the reviewer model for tightly constrained blocking vs non-blocking feedback.
 
     The reviewer is grounded with explicit runtime test facts so it does not
@@ -568,6 +624,8 @@ def review_code(
         "user_prompt": user_prompt,
         "response": response,
         "tool_calls": _format_tool_trace(tool_trace),
+        "tool_loop": tool_trace.get("summary", {}),
+        "tool_rounds": tool_trace.get("rounds", []),
     }
 
 
@@ -823,6 +881,7 @@ def run_workflow(
         "iterations": iterations,
         "completed_iteration": len(iterations),
         "stop_reason": stop_reason,
+        "observability": _build_tool_observability(iterations, stop_reason=stop_reason, error=None),
         "trace": {
             "plan": plan_trace,
         },

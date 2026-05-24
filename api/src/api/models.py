@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -25,6 +27,8 @@ class AgentTrace(BaseModel):
     user_prompt: str
     response: str
     tool_calls: str | None = None
+    tool_loop: dict[str, Any] | None = None
+    tool_rounds: list[dict[str, Any]] | None = None
 
 
 class IterationTrace(BaseModel):
@@ -60,4 +64,5 @@ class WorkflowResponse(BaseModel):
     iterations: list[IterationInfo]
     completed_iteration: int
     stop_reason: str
+    observability: dict[str, Any] | None = None
     trace: WorkflowTrace

@@ -45,6 +45,8 @@ class LlmTest(unittest.TestCase):
         self.assertIn("test_main.py", written)
         self.assertTrue(ran_tests)
         self.assertEqual([call["name"] for call in trace["tool_calls"]], ["write_file", "write_file", "run_tests"])
+        self.assertEqual(trace["summary"]["tool_call_counts"]["write_file"], 2)
+        self.assertEqual(trace["summary"]["run_tests_count"], 1)
 
     def test_fake_tool_loop_without_write_file_returns_review_pass(self) -> None:
         response, trace = llm._invoke_fake_with_tools(
@@ -55,7 +57,8 @@ class LlmTest(unittest.TestCase):
         )
 
         self.assertEqual(response, "PASS: Fake provider review.")
-        self.assertEqual(trace, {"tool_calls": []})
+        self.assertEqual(trace["tool_calls"], [])
+        self.assertEqual(trace["summary"]["tool_call_count"], 0)
 
     def test_bedrock_tool_loop_executes_tool_results_then_returns_text(self) -> None:
         class FakeClient:
@@ -110,7 +113,52 @@ class LlmTest(unittest.TestCase):
         self.assertEqual(response, "done")
         self.assertEqual(trace["tool_calls"][0]["status"], "success")
         self.assertEqual(trace["tool_calls"][0]["result"], "read main.py")
+        self.assertEqual(trace["summary"]["round_count"], 2)
+        self.assertEqual(trace["summary"]["tool_call_counts"], {"read_file": 1})
+        self.assertEqual(trace["rounds"][0]["tool_requests"][0]["name"], "read_file")
         self.assertEqual(client.calls, 2)
+
+    def test_bedrock_tool_loop_redacts_file_content_in_trace(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def converse(self, **kwargs):
+                del kwargs
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "output": {
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "toolUse": {
+                                            "name": "write_file",
+                                            "toolUseId": "tool-1",
+                                            "input": {"path": "main.py", "content": "SECRET"},
+                                        }
+                                    }
+                                ],
+                            }
+                        }
+                    }
+                return {"output": {"message": {"role": "assistant", "content": [{"text": "done"}]}}}
+
+        with (
+            patch.object(llm, "LLM_PROVIDER", "bedrock"),
+            patch.object(llm, "get_bedrock_client", return_value=FakeClient()),
+        ):
+            _, trace = llm.invoke_claude_with_tools(
+                "system",
+                "user",
+                tools=[],
+                handlers={"write_file": lambda path, content: f"Wrote {path}"},
+                max_tool_rounds=2,
+            )
+
+        self.assertEqual(trace["tool_calls"][0]["input"]["content"], "<redacted 6 characters>")
+        self.assertEqual(trace["rounds"][0]["tool_requests"][0]["input"]["content"], "<redacted 6 characters>")
 
     def test_bedrock_tool_loop_records_handler_errors(self) -> None:
         class FakeClient:

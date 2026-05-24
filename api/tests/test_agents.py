@@ -154,6 +154,48 @@ class AgentHelperTest(unittest.TestCase):
             self.assertEqual(trace["workspace_id"], "run")
             self.assertEqual(trace["evidence_count"], 1)
             self.assertEqual(trace["stop_reason"], "done")
+            self.assertEqual(trace["observability"]["outer_iteration_count"], 0)
+
+    def test_tool_observability_summarizes_inner_loops(self) -> None:
+        observability = agents._build_tool_observability(
+            [
+                {
+                    "iteration": 1,
+                    "retry_mode": False,
+                    "trace": {
+                        "implement": {
+                            "tool_loop": {
+                                "round_count": 3,
+                                "tool_call_count": 4,
+                                "tool_call_counts": {"write_file": 2, "run_tests": 2},
+                                "run_tests_count": 2,
+                                "error_count": 1,
+                                "malformed_tool_call_count": 0,
+                                "final_text_preview": "done",
+                            }
+                        },
+                        "review": {
+                            "tool_loop": {
+                                "round_count": 1,
+                                "tool_call_count": 1,
+                                "tool_call_counts": {"read_file": 1},
+                                "run_tests_count": 0,
+                                "error_count": 0,
+                                "malformed_tool_call_count": 0,
+                                "final_text_preview": "PASS",
+                            }
+                        },
+                    },
+                }
+            ],
+            stop_reason="tests_passed_and_review_clean",
+            error=None,
+        )
+
+        self.assertTrue(observability["completed"])
+        self.assertEqual(observability["total_tool_call_count"], 5)
+        self.assertEqual(observability["tool_call_counts"], {"write_file": 2, "run_tests": 2, "read_file": 1})
+        self.assertEqual([phase["phase"] for phase in observability["phases"]], ["implement", "review"])
 
 
 class WorkflowTest(unittest.TestCase):
@@ -186,6 +228,7 @@ class WorkflowTest(unittest.TestCase):
 
             self.assertEqual(result["stop_reason"], "tests_passed_and_review_clean")
             self.assertEqual(result["completed_iteration"], 1)
+            self.assertTrue(result["observability"]["completed"])
             self.assertIn("=== main.py ===", result["code"])
             self.assertNotIn("agent_trace.json", result["code"])
 
